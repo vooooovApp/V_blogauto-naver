@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
+const { normalizeMaxBodyImages } = require("./settings");
 
 const DEFAULT_AGENT_MODELS = {
   main: "high",
@@ -568,7 +569,7 @@ function parseProgressLine(text, options = {}) {
   const match = String(text || "").trim().match(/^BLOGAUTO_PROGRESS:\s*(.+)$/i);
   if (!match) return null;
   const code = match[1].trim().toLowerCase();
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(options.maxBodyImages)) ? Number(options.maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(options.maxBodyImages);
   const usesImages = options.includeTitleImage !== false || bodyImageLimit > 0;
   if (code === "image" && !usesImages) return null;
   const labels = {
@@ -684,7 +685,7 @@ function buildPrompt({
   runtimeRoot,
   currentDateLabel,
   includeTitleImage = true,
-  maxBodyImages = 2,
+  maxBodyImages = 10,
   sourceQuality = null,
   topicMode = "manual",
   researchTitleResult = null,
@@ -699,7 +700,7 @@ function buildPrompt({
 }) {
   const resultPath = path.join(jobDir, "agent-result.json");
   const imageDir = path.join(runtimeRoot || path.dirname(path.dirname(jobDir)), "image");
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(maxBodyImages)) ? Number(maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(maxBodyImages);
   const usesImages = includeTitleImage !== false || bodyImageLimit > 0;
   const researchSearchNeed = String(researchTitleResult?.searchNeed || "").toLowerCase();
   const writerContract = buildWriterContract(researchTitleResult, {
@@ -800,7 +801,7 @@ function buildPrompt({
     "Required output:",
     "- Write a JSON file at the exact Output JSON path.",
     "- The JSON file must be UTF-8 and Korean text must not be mojibake or escaped into a broken encoding.",
-    "- JSON shape: { \"status\": \"success\" | \"failed\", \"failureReason\": string, \"title\": string, \"article\": string, \"tags\": string[], \"bodyImages\": [{\"sequence\": number, \"path\": string, \"prompt\": string}], \"titleImagePath\": string, \"titleImagePrompt\": string, \"notes\": string[] }.",
+    "- JSON shape: { \"status\": \"success\" | \"failed\", \"failureReason\": string, \"title\": string, \"article\": string, \"tags\": string[], \"bodyImages\": [{\"sequence\": number, \"sectionHeading\": string, \"path\": string, \"prompt\": string}], \"titleImagePath\": string, \"titleImagePrompt\": string, \"titleImageText\": string[], \"notes\": string[] }.",
     "- If the extracted excerpts are missing, too thin, unrelated to the locked Topic thesis, or cannot support a publishable post, do not write an explanatory article.",
     "- In that failure case, set status to \"failed\", set failureReason to a concise Korean reason, set title and article to empty strings, set bodyImages to [], set titleImagePath to \"\", and put the reason in notes.",
     "- In a failure case, do not generate images and do not write article sections explaining why writing is difficult.",
@@ -836,18 +837,19 @@ function buildPrompt({
     "- Every section marker must start with \"[SECTION - \" and end with \"]\" on the same standalone line. Never omit the closing bracket.",
     "- If you would write 첫째/둘째/첫 번째/두 번째 as an item label, convert that item label into a [SECTION - ...] marker instead of keeping it inside a paragraph.",
     "- Section marker text must be concise, natural Korean, reader-facing, and suitable as a Naver Blog section heading. Avoid headings that describe research/source process instead of reader value.",
+    bodyImageLimit > 0 ? `- Body images are section-centric. Keep the article at no more than ${bodyImageLimit} sections and create exactly one body image handoff for every [SECTION - ...] section.` : "",
     "- For events, job fairs, exhibitions, contests, applications, recruitment notices, sales, deadlines, or any date-bound information: exclude anything whose event date, application period, deadline, or relevant operating period is already past relative to the Current writing date.",
     "- If a date-bound candidate has no confirmable current or future date from an official/reliable source, do not present it as an upcoming/current opportunity. You may mention it only as a general example without implying availability.",
     "- Prefer official/current pages for date-bound information and record in notes that outdated or unconfirmed date-bound candidates were excluded when applicable.",
     bodyImageLimit > 0
-      ? "- Insert image markers exactly as [IMAGE INSERT - 1], [IMAGE INSERT - 2], etc where images belong."
+      ? "- Immediately after every [SECTION - 소제목] marker, insert exactly one matching [IMAGE INSERT - n] marker. Number them consecutively from 1 in section order."
       : "- Do not insert any [IMAGE INSERT - n] markers in the article body.",
     bodyImageLimit > 0
-      ? `- Prepare no more than ${bodyImageLimit} body image prompts. Put each prompt in bodyImages[].prompt, keep bodyImages[].path empty, and do not generate actual image files.`
+      ? `- Prepare exactly one bodyImages item for every section, up to ${bodyImageLimit}. sequence must match section order, sectionHeading must exactly match the [SECTION - ...] heading, prompt must compress the whole section, and path must stay empty.`
       : "- Do not generate body images. Set bodyImages to an empty array.",
     includeTitleImage
-      ? "- Prepare one title image prompt in titleImagePrompt and keep titleImagePath empty. Do not generate an actual title image file."
-      : "- Do not prepare a title image. Set titleImagePath and titleImagePrompt to empty strings.",
+      ? "- Prepare one title image prompt in titleImagePrompt, extract 2-5 concise visible Korean strings into titleImageText, and keep titleImagePath empty. Do not generate an actual title image file."
+      : "- Do not prepare a title image. Set titleImagePath and titleImagePrompt to empty strings and titleImageText to an empty array.",
     usesImages
       ? "- Actual image generation is handled later by Image Worker. Writer Agent must only provide grounded prompts and marker positions."
       : "- Since no images were requested, do not perform an image prompt or image-generation stage and do not write image-generation notes.",
@@ -855,11 +857,12 @@ function buildPrompt({
     usesImages && accountImageStylePrompt ? "- Account-specific image style prompt: apply this style when drafting titleImagePrompt and bodyImages[].prompt, while keeping the article facts and each section context primary." : "",
     usesImages && accountImageStylePrompt ? accountImageStylePrompt : "",
     usesImages && accountImageStylePrompt ? "- If the account style conflicts with title text policy, body no-text policy, or verified facts, follow the app policy and facts first." : "",
-    includeTitleImage ? "- The title image must summarize the whole article across sections. Base it on the article's central entities, issue, relationship, or timeline, so a reader can infer the article topic before reading." : "",
-    includeTitleImage ? "- Title image prompts may request short Korean headline text, key verified numbers, period, benefit, or condition text when it helps summarize the whole article. Keep text short and do not invent unverified facts." : "",
-    bodyImageLimit > 0 ? "- Each body image must summarize the nearby section where its [IMAGE INSERT - n] marker appears. Use concrete nouns, named products/people/places/events, and the section's key comparison or process." : "",
+    includeTitleImage ? "- The title image must be one information-rich Korean editorial summary card that compresses the whole completed article across all sections, not a generic representative scene or decorative illustration." : "",
+    includeTitleImage ? "- Automatically derive titleImageText from the completed article without waiting for user-specified wording: include one concise Korean headline plus 1-4 of the most useful verified numbers, periods, benefits, conditions, comparisons, or checklist cues." : "",
+    includeTitleImage ? "- Every titleImageText string must appear verbatim inside titleImagePrompt with an explicit instruction to render it visibly, large, readable, and accurate in the image. Do not invent facts." : "",
+    bodyImageLimit > 0 ? "- Every body image must compress its entire corresponding section, not merely decorate or loosely support it. Use the section's concrete subject plus its key relationship, process, comparison, timeline, decision cue, or factual structure." : "",
     usesImages ? "- When writing image prompts, include the article title or section heading context, 2-4 concrete visual elements from the extracted facts, and a clear Korean blog editorial style. Do not invent facts that are not in the article." : "",
-    bodyImageLimit > 0 ? "- Body image prompts must keep the existing no-text policy: avoid readable text, Korean paragraphs, long labels, UI copy, and text-heavy charts. Prefer visual composition, objects, scenes, icons, and simple non-textual cues." : "",
+    bodyImageLimit > 0 ? "- Body images remain visual summaries rather than title cards: avoid readable Korean paragraphs, long labels, UI copy, and text-heavy charts. Prefer concrete visual composition, objects, scenes, icons, timelines, comparisons, and process cues grounded in that section." : "",
     usesImages ? "- Do not return an image directory path as an image path. Each path must include the concrete image filename such as .png, .jpg, .jpeg, or .webp." : "",
     usesImages ? "- Do not call image generation tools. Do not spend time trying PowerShell, shell copy, or Node copy workarounds for images." : "",
     "- For automatic/current-information topics, avoid generic how-to guide titles such as '~찾는 법', '~확인법', '~가이드' unless the user explicitly asked for a how-to guide.",
@@ -1055,6 +1058,12 @@ function buildMainReviewPrompt({
     "- The body must directly answer the question or promise implied by the title.",
     "- If the title promises a guide, checklist, reason, comparison, application path, or decision help, the body must deliver that exact reader value with supported specifics. Generic warnings or broad background do not satisfy the title.",
     "",
+    "Image contract review:",
+    "- When title image generation is enabled, titleImageText must contain 2-5 automatically derived visible Korean strings and titleImagePrompt must explicitly render every string as a readable part of one whole-article information card.",
+    "- The title image direction must compress the completed article across sections. A generic scene, background, product shot, or collection of objects without an editorial information hierarchy must receive REVISION.",
+    "- When body image generation is enabled, every [SECTION - ...] section must contain exactly one sequential [IMAGE INSERT - n] marker and exactly one bodyImages item with the same sequence and exact sectionHeading.",
+    "- Every body image prompt must compress that entire section's actual relationship, process, comparison, timeline, decision cue, or factual structure. A decorative or loosely related illustration must receive REVISION.",
+    "",
     "Factuality review:",
     "- For fact-based topics, only confirmed facts from the Research/Title handoff and usable sources may be used.",
     "- Conditions, dates, amounts, targets, application methods, prices, schedules, official claims, statistics, and policy details must not be invented.",
@@ -1102,7 +1111,7 @@ function buildMainReviewPrompt({
     "",
     "Required output:",
     "- Write a UTF-8 JSON file at the exact Output JSON path.",
-    "- JSON shape: { \"status\": \"PASS\" | \"REVISION\" | \"BLOCK\", \"failureReason\": string, \"titleReviewPass\": boolean, \"articleAnswersTitle\": boolean, \"topicPreserved\": boolean, \"factualityPass\": boolean, \"currentBridgePass\": boolean, \"sourceUsePass\": boolean, \"bodyQualityPass\": boolean, \"riskExpressionPass\": boolean, \"writerContractPass\": boolean, \"readerFacingArticlePass\": boolean, \"noResearchProcessNarrationPass\": boolean, \"publishable\": boolean, \"issues\": string[], \"revisionInstructions\": string[], \"notes\": string[] }.",
+    "- JSON shape: { \"status\": \"PASS\" | \"REVISION\" | \"BLOCK\", \"failureReason\": string, \"titleReviewPass\": boolean, \"articleAnswersTitle\": boolean, \"topicPreserved\": boolean, \"factualityPass\": boolean, \"currentBridgePass\": boolean, \"sourceUsePass\": boolean, \"bodyQualityPass\": boolean, \"imageContractPass\": boolean, \"riskExpressionPass\": boolean, \"writerContractPass\": boolean, \"readerFacingArticlePass\": boolean, \"noResearchProcessNarrationPass\": boolean, \"publishable\": boolean, \"issues\": string[], \"revisionInstructions\": string[], \"notes\": string[] }.",
     "- Use Korean for failureReason, issues, revisionInstructions, and notes.",
     "- If status is PASS, failureReason must be empty and every boolean review field must be true.",
     "- If status is REVISION or BLOCK, failureReason must concisely explain why it cannot be published as-is.",
@@ -1197,16 +1206,17 @@ function buildImageWorkerPrompt({
   imageAspectRatio = DEFAULT_IMAGE_ASPECT_RATIO,
   titleImageAspectRatio,
   bodyImageAspectRatio,
-  maxBodyImages = 2,
+  maxBodyImages = 10,
   writerResult,
   finalTitle,
-  accountImageStylePrompt = ""
+  accountImageStylePrompt = "",
+  imageRevisionFeedback = ""
 }) {
   const resultPath = path.join(jobDir, "image-worker-result.json");
   const imageDir = path.join(runtimeRoot || path.dirname(path.dirname(jobDir)), "image");
   const selectedTitleImageAspectRatio = normalizeImageAspectRatio(titleImageAspectRatio || imageAspectRatio);
   const selectedBodyImageAspectRatio = normalizeImageAspectRatio(bodyImageAspectRatio || imageAspectRatio);
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(maxBodyImages)) ? Number(maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(maxBodyImages);
   fs.mkdirSync(imageDir, { recursive: true });
   return [
     "You are the Image Worker for a Korean Naver Blog automation app.",
@@ -1215,14 +1225,15 @@ function buildImageWorkerPrompt({
     `Final title: ${finalTitle || writerResult?.title || ""}`,
     `Image output directory: ${imageDir}`,
     `Output JSON path: ${resultPath}`,
+    imageRevisionFeedback ? `Previous image contract failure to correct: ${imageRevisionFeedback}` : "",
     "",
     "Progress logging:",
     "- BLOGAUTO_PROGRESS: image",
     "- BLOGAUTO_PROGRESS: save",
     "",
     "Image generation scope:",
-    includeTitleImage ? "- Generate one title image when titleImagePrompt is available." : "- Do not generate a title image.",
-    bodyImageLimit > 0 ? `- Generate no more than ${bodyImageLimit} body images from bodyImages[].prompt.` : "- Do not generate body images.",
+    includeTitleImage ? "- Generate exactly one title image when titleImagePrompt is available." : "- Do not generate a title image.",
+    bodyImageLimit > 0 ? `- Generate exactly one body image for every supplied bodyImages item, up to ${bodyImageLimit}; do not skip, merge, or reorder sections.` : "- Do not generate body images.",
     `- Requested title image aspect ratio: ${selectedTitleImageAspectRatio}.`,
     `- Requested body image aspect ratio: ${selectedBodyImageAspectRatio}.`,
     "- Generate title images in the requested title image aspect ratio and body images in the requested body image aspect ratio.",
@@ -1240,36 +1251,39 @@ function buildImageWorkerPrompt({
     accountImageStylePrompt ? accountImageStylePrompt : "",
     "",
     "Title image policy:",
-    includeTitleImage ? "- The title image is the representative thumbnail for the whole article, not a generic background." : "- Title image generation is disabled.",
+    includeTitleImage ? "- The title image is one information-rich Korean editorial card that compresses the whole article across sections, not a generic background, representative scene, product shot, or body-style illustration." : "- Title image generation is disabled.",
     includeTitleImage ? `- The title image must use aspect ratio ${selectedTitleImageAspectRatio}.` : "",
-    includeTitleImage ? "- Korean text is allowed in the title image when it helps summarize the article. Use only short headline/key-point text, verified numbers, periods, benefits, or conditions from the article." : "",
+    includeTitleImage ? "- Visible Korean text is mandatory. Render every supplied titleImageText string verbatim, large, readable, accurate, and integrated into a clear headline/key-fact hierarchy." : "",
     includeTitleImage ? "- Do not add long Korean paragraphs, fake official marks, unverified amounts, unverified dates, or labels that are not supported by the article." : "",
-    includeTitleImage ? "- A card-style Korean blog thumbnail with a clear headline, central subject, and 2-4 visual fact cues is acceptable." : "",
+    includeTitleImage ? "- Combine the visible headline/key facts with 2-4 concrete article-wide visual fact cues. The result must be visibly distinct from body images." : "",
+    includeTitleImage ? "- Inspect the generated title image before accepting it. If any required text is missing, unreadable, materially misspelled, or the image does not summarize the whole article, regenerate it once before returning a path." : "",
     "",
     "Body image policy:",
-    bodyImageLimit > 0 ? "- Body images keep the existing policy: avoid readable Korean text, paragraphs, long labels, UI copy, and text-heavy charts." : "- Body image generation is disabled.",
+    bodyImageLimit > 0 ? "- Body images are section-compression visuals, not generic decoration and not title cards. Avoid readable Korean paragraphs, long labels, UI copy, and text-heavy charts." : "- Body image generation is disabled.",
     bodyImageLimit > 0 ? `- Every body image must use aspect ratio ${selectedBodyImageAspectRatio}.` : "",
-    bodyImageLimit > 0 ? "- Body images should visually support the nearby section with objects, scenes, icons, or process cues." : "",
+    bodyImageLimit > 0 ? "- For every supplied item, preserve sequence and sectionHeading and compress the entire section's concrete subject, relationship, process, comparison, timeline, or decision cue into one coherent image." : "",
+    bodyImageLimit > 0 ? "- Inspect each generated body image before accepting it. If it is generic, loosely related, or misses the section's central structure, regenerate it once before returning a path." : "",
     "",
     "Writer Agent image handoff:",
     JSON.stringify({
       titleImagePrompt: writerResult?.titleImagePrompt || "",
+      titleImageText: Array.isArray(writerResult?.titleImageText) ? writerResult.titleImageText : [],
       bodyImages: Array.isArray(writerResult?.bodyImages) ? writerResult.bodyImages.slice(0, bodyImageLimit) : [],
       article: writerResult?.article || ""
     }, null, 2),
     "",
     "Required output:",
     "- Write a UTF-8 JSON file at the exact Output JSON path.",
-    "- JSON shape: { \"status\": \"success\" | \"partial\" | \"failed\", \"failureReason\": string, \"titleImagePath\": string, \"bodyImages\": [{\"sequence\": number, \"path\": string, \"prompt\": string}], \"notes\": string[] }.",
+    "- JSON shape: { \"status\": \"success\" | \"partial\" | \"failed\", \"failureReason\": string, \"titleImagePath\": string, \"titleImageVerified\": boolean, \"bodyImages\": [{\"sequence\": number, \"sectionHeading\": string, \"path\": string, \"prompt\": string, \"summaryVerified\": boolean}], \"notes\": string[] }.",
     "- If no image prompt is available, return status \"failed\", empty image paths, and a concise Korean note.",
     "- If some images succeed and some fail, return status \"partial\" with successful paths and notes for failures.",
-    "- Status \"success\" is allowed only when every requested image has a concrete image file path.",
+    "- Status \"success\" is allowed only when every requested image has a concrete image file path, titleImageVerified is true when requested, and every body image has summaryVerified true.",
     "- Print one final line after writing the file: BLOGAUTO_RESULT_READY"
   ].filter((line) => line !== "").join("\n");
 }
 
 function mergeImageWorkerResult(writerResult, imageResult, options = {}) {
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(options.maxBodyImages)) ? Number(options.maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(options.maxBodyImages);
   const writerBodyImages = Array.isArray(writerResult?.bodyImages) ? writerResult.bodyImages : [];
   const generatedBodyImages = Array.isArray(imageResult?.bodyImages) ? imageResult.bodyImages : [];
   const mergedBodyImages = generatedBodyImages
@@ -1277,8 +1291,10 @@ function mergeImageWorkerResult(writerResult, imageResult, options = {}) {
     .slice(0, bodyImageLimit)
     .map((item) => ({
       sequence: Number(item.sequence || 0),
+      sectionHeading: String(item.sectionHeading || writerBodyImages.find((writerImage) => Number(writerImage.sequence) === Number(item.sequence))?.sectionHeading || ""),
       path: String(item.path || ""),
-      prompt: String(item.prompt || writerBodyImages.find((writerImage) => Number(writerImage.sequence) === Number(item.sequence))?.prompt || "")
+      prompt: String(item.prompt || writerBodyImages.find((writerImage) => Number(writerImage.sequence) === Number(item.sequence))?.prompt || ""),
+      summaryVerified: item.summaryVerified === true
     }))
     .filter((item) => item.sequence > 0);
 
@@ -1296,6 +1312,49 @@ function mergeImageWorkerResult(writerResult, imageResult, options = {}) {
     bodyImages: mergedBodyImages,
     notes
   };
+}
+
+function imageWorkerContractIssueReason(imageResult, writerResult, options = {}) {
+  const status = String(imageResult?.status || "").toLowerCase();
+  const sessionImageDataAvailable = /(?:generated\s+image\s+data|codex\s+session|세션.*이미지|이미지.*세션)/i.test(
+    [imageResult?.failureReason, ...(Array.isArray(imageResult?.notes) ? imageResult.notes : [])]
+      .filter(Boolean)
+      .join(" ")
+  );
+  if (status !== "success" && !(status === "partial" && sessionImageDataAvailable)) {
+    return String(imageResult?.failureReason || "").trim() || "Image Worker가 모든 요청 이미지를 성공 상태로 반환하지 않았습니다.";
+  }
+  if (options.includeTitleImage !== false) {
+    if (!String(imageResult?.titleImagePath || "").trim() && !sessionImageDataAvailable) {
+      return "본문 전체를 압축한 타이틀 이미지 파일이 없습니다.";
+    }
+    if (imageResult?.titleImageVerified !== true) {
+      return "타이틀 이미지의 필수 문구 가독성과 본문 전체 요약 여부가 검증되지 않았습니다.";
+    }
+  }
+
+  const bodyImageLimit = normalizeMaxBodyImages(options.maxBodyImages);
+  if (bodyImageLimit === 0) return "";
+  const expected = Array.isArray(writerResult?.bodyImages)
+    ? writerResult.bodyImages.slice(0, bodyImageLimit)
+    : [];
+  const generated = Array.isArray(imageResult?.bodyImages) ? imageResult.bodyImages : [];
+  if (generated.length !== expected.length) {
+    return `섹션별 본문 이미지 ${expected.length}장이 필요하지만 ${generated.length}장이 반환됐습니다.`;
+  }
+  for (const expectedImage of expected) {
+    const actual = generated.find((item) => Number(item?.sequence) === Number(expectedImage?.sequence));
+    if (!actual || (!String(actual.path || "").trim() && !sessionImageDataAvailable)) {
+      return `본문 섹션 ${expectedImage.sequence} 이미지 파일이 없습니다.`;
+    }
+    if (normalizedSectionHeading(actual.sectionHeading) !== normalizedSectionHeading(expectedImage.sectionHeading)) {
+      return `본문 섹션 ${expectedImage.sequence} 이미지의 sectionHeading이 Writer 전달값과 다릅니다.`;
+    }
+    if (actual.summaryVerified !== true) {
+      return `본문 섹션 ${expectedImage.sequence} 이미지가 섹션 전체 압축 이미지로 검증되지 않았습니다.`;
+    }
+  }
+  return "";
 }
 
 function readAgentResult(jobDir, fileName = "agent-result.json") {
@@ -1620,6 +1679,79 @@ function writerOutputIssueReason(writerResult) {
   return "";
 }
 
+function articleSections(article) {
+  const text = String(article || "");
+  const matches = [...text.matchAll(/^\[SECTION\s*-\s*(.+?)\]\s*$/gmi)];
+  return matches.map((match, index) => ({
+    heading: String(match[1] || "").replace(/\s+/g, " ").trim(),
+    content: text.slice(match.index, matches[index + 1]?.index ?? text.length)
+  }));
+}
+
+function normalizedSectionHeading(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function writerImageContractIssueReason(writerResult, options = {}) {
+  if (options.includeTitleImage !== false) {
+    const titleText = Array.isArray(writerResult?.titleImageText)
+      ? writerResult.titleImageText.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const titlePrompt = String(writerResult?.titleImagePrompt || "").trim();
+    if (titleText.length < 2 || titleText.length > 5) {
+      return "타이틀 이미지가 본문 전체를 압축한 2~5개의 표시 문구(titleImageText)를 반환하지 않았습니다.";
+    }
+    if (!titleText.some((item) => /[가-힣]/.test(item))) {
+      return "타이틀 이미지 표시 문구에 한국어 핵심 헤드라인이 없습니다.";
+    }
+    if (!titlePrompt || !titleText.every((item) => titlePrompt.includes(item))) {
+      return "타이틀 이미지 프롬프트가 자동 추출한 모든 표시 문구를 이미지 안에 명확히 넣도록 전달하지 않았습니다.";
+    }
+  }
+
+  const bodyImageLimit = normalizeMaxBodyImages(options.maxBodyImages);
+  if (bodyImageLimit === 0) return "";
+
+  const sections = articleSections(writerResult?.article);
+  if (sections.length === 0) {
+    return "본문 이미지 생성을 위해 필요한 [SECTION - 소제목] 섹션이 없습니다.";
+  }
+  if (sections.length > bodyImageLimit) {
+    return `본문 섹션이 ${sections.length}개로 섹션별 이미지 안전 한도 ${bodyImageLimit}개를 초과했습니다.`;
+  }
+
+  const bodyImages = Array.isArray(writerResult?.bodyImages) ? writerResult.bodyImages : [];
+  if (bodyImages.length !== sections.length) {
+    return `본문 ${sections.length}개 섹션에 각각 한 장이 필요하지만 이미지 프롬프트가 ${bodyImages.length}개입니다.`;
+  }
+
+  for (let index = 0; index < sections.length; index += 1) {
+    const expectedSequence = index + 1;
+    const image = bodyImages[index] || {};
+    const markerPattern = new RegExp(`^\\[IMAGE INSERT\\s*-\\s*${expectedSequence}\\]\\s*$`, "mi");
+    if (!markerPattern.test(sections[index].content)) {
+      return `본문 섹션 ${expectedSequence}(${sections[index].heading}) 안에 대응 이미지 마커가 없습니다.`;
+    }
+    const sectionLines = sections[index].content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!new RegExp(`^\\[IMAGE INSERT\\s*-\\s*${expectedSequence}\\]$`, "i").test(sectionLines[1] || "")) {
+      return `본문 섹션 ${expectedSequence}(${sections[index].heading}) 바로 뒤에 대응 이미지 마커가 없습니다.`;
+    }
+    if (Number(image.sequence) !== expectedSequence) {
+      return `본문 이미지 sequence가 섹션 순서와 일치하지 않습니다: ${expectedSequence}번이 필요합니다.`;
+    }
+    if (normalizedSectionHeading(image.sectionHeading) !== normalizedSectionHeading(sections[index].heading)) {
+      return `본문 이미지 ${expectedSequence}의 sectionHeading이 실제 섹션 제목과 일치하지 않습니다.`;
+    }
+    if (String(image.prompt || "").trim().length < 30) {
+      return `본문 이미지 ${expectedSequence} 프롬프트가 해당 섹션 전체를 압축하기에 너무 짧습니다.`;
+    }
+  }
+  return "";
+}
+
 function isSourceInsufficientWriterIssue(reason, writerResult, researchResult) {
   const text = compactTextList([
     reason,
@@ -1663,6 +1795,7 @@ function mainReviewPassIssueReason(mainReviewResult) {
     ["currentBridgePass", "current bridge"],
     ["sourceUsePass", "source use"],
     ["bodyQualityPass", "body quality"],
+    ["imageContractPass", "image contract"],
     ["riskExpressionPass", "risk expressions"],
     ["writerContractPass", "writer contract"],
     ["readerFacingArticlePass", "reader-facing article"],
@@ -2498,7 +2631,11 @@ async function runCodexGeneration(options, log = () => {}) {
     };
   }
 
-  const maxReviewAttempts = String(effectiveOptions.topicMode || "").toLowerCase() === "auto" ? 3 : 1;
+  const imageContractEnabled = effectiveOptions.includeTitleImage !== false
+    || normalizeMaxBodyImages(effectiveOptions.maxBodyImages) > 0;
+  const maxReviewAttempts = String(effectiveOptions.topicMode || "").toLowerCase() === "auto"
+    ? 3
+    : imageContractEnabled ? 2 : 1;
   let writerResult = null;
   let mainReviewResult = null;
   let mainReviewStatus = "";
@@ -2531,7 +2668,8 @@ async function runCodexGeneration(options, log = () => {}) {
     agentGrossTokenTotals.writer += Number(writerResult.tokenUsage?.grossTotal || writerResult.tokenUsage?.total || 0);
     rememberRateLimits(writerResult);
 
-    const writerIssueReason = writerOutputIssueReason(writerResult);
+    const writerIssueReason = writerOutputIssueReason(writerResult)
+      || writerImageContractIssueReason(writerResult, effectiveOptions);
     if (writerIssueReason) {
       log(`Writer Agent 작성 실패: ${writerIssueReason}`, "warn", "writer");
       const writerSourceIssue = isSourceInsufficientWriterIssue(writerIssueReason, writerResult, researchResult);
@@ -2827,50 +2965,69 @@ async function runCodexGeneration(options, log = () => {}) {
     ...writerResult,
     title: finalTitle || String(writerResult.title || "").trim()
   };
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(effectiveOptions.maxBodyImages)) ? Number(effectiveOptions.maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(effectiveOptions.maxBodyImages);
   const usesImages = effectiveOptions.includeTitleImage !== false || bodyImageLimit > 0;
   if (usesImages) {
     log("Image Worker 이미지 생성 시작", "info", "main");
-    try {
-      const imageWorkerResult = await runCodexTask({
-        options: effectiveOptions,
-        prompt: buildImageWorkerPrompt({
-          ...effectiveOptions,
-          writerResult: finalWriterResult,
-          finalTitle
-        }),
-        promptFileName: "image-worker-prompt.txt",
-        resultFileName: "image-worker-result.json",
-        log,
-        tokenOffset: totalTokens,
-        grossTokenOffset: totalGrossTokens,
-        agentTokenOffset: agentTokenTotals.image,
-        agent: "image"
-      });
-      totalTokens += Number(imageWorkerResult.tokenUsage?.total || 0);
-      totalGrossTokens += Number(imageWorkerResult.tokenUsage?.grossTotal || imageWorkerResult.tokenUsage?.total || 0);
-      agentTokenTotals.image += Number(imageWorkerResult.tokenUsage?.total || 0);
-      agentGrossTokenTotals.image += Number(imageWorkerResult.tokenUsage?.grossTotal || imageWorkerResult.tokenUsage?.total || 0);
-      rememberRateLimits(imageWorkerResult);
-      const imageStatus = String(imageWorkerResult.status || "").toLowerCase();
-      if (imageStatus !== "success") {
-        log("Image Worker 이미지 생성 완료, 파일 저장 중입니다.", "info", "main");
-      } else {
-        log("Image Worker 이미지 생성 완료", "info", "main");
+    let imageContractFailure = "";
+    for (let imageAttempt = 1; imageAttempt <= 2; imageAttempt += 1) {
+      try {
+        const imageWorkerResult = await runCodexTask({
+          options: effectiveOptions,
+          prompt: buildImageWorkerPrompt({
+            ...effectiveOptions,
+            writerResult: finalWriterResult,
+            finalTitle,
+            imageRevisionFeedback: imageContractFailure
+          }),
+          promptFileName: imageAttempt === 1 ? "image-worker-prompt.txt" : `image-worker-retry-${imageAttempt}.txt`,
+          resultFileName: "image-worker-result.json",
+          log,
+          tokenOffset: totalTokens,
+          grossTokenOffset: totalGrossTokens,
+          agentTokenOffset: agentTokenTotals.image,
+          agent: "image"
+        });
+        totalTokens += Number(imageWorkerResult.tokenUsage?.total || 0);
+        totalGrossTokens += Number(imageWorkerResult.tokenUsage?.grossTotal || imageWorkerResult.tokenUsage?.total || 0);
+        agentTokenTotals.image += Number(imageWorkerResult.tokenUsage?.total || 0);
+        agentGrossTokenTotals.image += Number(imageWorkerResult.tokenUsage?.grossTotal || imageWorkerResult.tokenUsage?.total || 0);
+        rememberRateLimits(imageWorkerResult);
+        imageContractFailure = imageWorkerContractIssueReason(imageWorkerResult, finalWriterResult, effectiveOptions);
+        if (!imageContractFailure) {
+          log(`Image Worker 이미지 생성 및 요약 계약 검증 완료 (${imageAttempt}/2)`, "info", "main");
+          finalWriterResult = mergeImageWorkerResult(finalWriterResult, imageWorkerResult, effectiveOptions);
+          break;
+        }
+        log(`Image Worker 요약 계약 검증 실패 (${imageAttempt}/2): ${imageContractFailure}`, "warn", "main");
+        preserveAgentFile(
+          options.jobDir,
+          "image-worker-result.json",
+          `image-worker-invalid-result-${imageAttempt}.json`
+        );
+      } catch (error) {
+        if (isCodexUsageLimitError(error)) {
+          throw error;
+        }
+        imageContractFailure = `Image Worker 실행 실패: ${error.message}`;
+        log(`${imageContractFailure} (${imageAttempt}/2)`, "warn", "main");
       }
-      finalWriterResult = mergeImageWorkerResult(finalWriterResult, imageWorkerResult, effectiveOptions);
-    } catch (error) {
-      if (isCodexUsageLimitError(error)) {
-        throw error;
-      }
-      log(`Image Worker 실패: ${error.message}. 이미지 삽입 없이 본문 작성을 계속합니다.`, "warn", "main");
-      finalWriterResult = mergeImageWorkerResult(finalWriterResult, {
+    }
+    if (imageContractFailure) {
+      return {
         status: "failed",
-        failureReason: error.message,
-        titleImagePath: "",
+        failurePhase: "image",
+        failureReason: imageContractFailure,
+        title: "",
+        article: "",
+        tags: [],
         bodyImages: [],
-        notes: [`Image Worker 실패: ${error.message}`]
-      }, effectiveOptions);
+        titleImagePath: "",
+        notes: [imageContractFailure],
+        researchTitleResult: researchResult,
+        mainReviewResult,
+        tokenUsage: tokenUsageSnapshot()
+      };
     }
   }
 
@@ -2888,6 +3045,9 @@ module.exports = {
   _private: {
     compactSearchResultsForPrompt,
     rankSearchResultsForPrompt,
-    buildWriterContract
+    buildWriterContract,
+    articleSections,
+    writerImageContractIssueReason,
+    imageWorkerContractIssueReason
   }
 };

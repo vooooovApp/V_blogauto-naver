@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { normalizeImageAspectRatio, readSettings } = require("../src/lib/settings");
+const { normalizeImageAspectRatio, normalizeMaxBodyImages, readSettings } = require("../src/lib/settings");
 const { readAccountStore, getAccountProfileDir } = require("../src/lib/accountStore");
 const { ensureRuntimeFiles, readHistory, appendHistory } = require("../src/lib/history");
 const { collectSearchResults } = require("../src/lib/search");
@@ -143,7 +143,7 @@ async function main() {
     includeTitleImage: settings.includeTitleImage !== false,
     titleImageAspectRatio: normalizeImageAspectRatio(settings.titleImageAspectRatio || settings.imageAspectRatio),
     bodyImageAspectRatio: normalizeImageAspectRatio(settings.bodyImageAspectRatio || settings.imageAspectRatio),
-    maxBodyImages: Number.isFinite(Number(settings.maxBodyImages)) ? Number(settings.maxBodyImages) : 2,
+    maxBodyImages: normalizeMaxBodyImages(settings.maxBodyImages),
     sourceQuality: { status: "not_requested" },
     historyTitles: titleHistory.map((item) => item.title),
     onTokenUsage: (usage) => {
@@ -213,7 +213,7 @@ async function main() {
     topic,
     keyword,
     includeTitleImage: settings.includeTitleImage !== false,
-    maxBodyImages: Number.isFinite(Number(settings.maxBodyImages)) ? Number(settings.maxBodyImages) : 2,
+    maxBodyImages: normalizeMaxBodyImages(settings.maxBodyImages),
     currentDateLabel,
     result: codexResult
   });

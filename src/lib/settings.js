@@ -46,7 +46,7 @@ const DEFAULT_SETTINGS = {
   imageAspectRatio: DEFAULT_IMAGE_ASPECT_RATIO,
   titleImageAspectRatio: DEFAULT_IMAGE_ASPECT_RATIO,
   bodyImageAspectRatio: DEFAULT_IMAGE_ASPECT_RATIO,
-  maxBodyImages: 2,
+  maxBodyImages: 10,
   breakSentencesInBody: true,
   agentModels: {
     main: "high",
@@ -78,8 +78,14 @@ function normalizeSettings(settings) {
   normalized.imageAspectRatio = normalizeImageAspectRatio(normalized.imageAspectRatio);
   normalized.titleImageAspectRatio = normalizeImageAspectRatio(normalized.titleImageAspectRatio || normalized.imageAspectRatio);
   normalized.bodyImageAspectRatio = normalizeImageAspectRatio(normalized.bodyImageAspectRatio || normalized.imageAspectRatio);
+  normalized.maxBodyImages = normalizeMaxBodyImages(normalized.maxBodyImages);
   normalized.codexModel = normalizeCodexModel(normalized.codexModel);
   return normalized;
+}
+
+function normalizeMaxBodyImages(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return 10;
+  return Number(value) > 0 ? 10 : 0;
 }
 
 function isDefaultCodexCmdPath(value) {
@@ -178,6 +184,7 @@ module.exports = {
   resolveCodexCmdPath,
   ensureSettingsFile,
   normalizeImageAspectRatio,
+  normalizeMaxBodyImages,
   readSettings,
   writeSettings,
   getSettingsPath

@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { readSettings } = require("../src/lib/settings");
+const { normalizeMaxBodyImages, readSettings } = require("../src/lib/settings");
 const { readAccountStore, getAccountProfileDir } = require("../src/lib/accountStore");
 const { normalizeAgentResult } = require("../src/lib/imageAssets");
 const { publishToNaver } = require("../src/lib/naverPublisher");
@@ -96,7 +96,7 @@ async function main() {
     topic,
     keyword,
     includeTitleImage: settings.includeTitleImage !== false,
-    maxBodyImages: Number.isFinite(Number(settings.maxBodyImages)) ? Number(settings.maxBodyImages) : 2,
+    maxBodyImages: normalizeMaxBodyImages(settings.maxBodyImages),
     currentDateLabel: "",
     result: rawResult
   });

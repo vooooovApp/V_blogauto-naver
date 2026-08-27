@@ -33,6 +33,110 @@ for (const file of targets) {
   }
 }
 
+const { normalizeMaxBodyImages } = require(path.join(root, "src", "lib", "settings"));
+const { _private: imageContractPrivate } = require(path.join(root, "src", "lib", "codexRunner"));
+if (normalizeMaxBodyImages(0) !== 0 || normalizeMaxBodyImages(1) !== 10 || normalizeMaxBodyImages(2) !== 10 || normalizeMaxBodyImages(10) !== 10) {
+  failed = true;
+  console.error("src/lib/settings.js: enabled body images must normalize to section-by-section generation with a 10 image safety cap");
+}
+if (normalizeMaxBodyImages(undefined) !== 10) {
+  failed = true;
+  console.error("src/lib/settings.js: missing body image setting must preserve the section-based default");
+}
+
+const validSectionImageWriterResult = {
+  status: "success",
+  title: "테스트 제목",
+  article: [
+    "[SECTION - 첫 번째 핵심]",
+    "[IMAGE INSERT - 1]",
+    "첫 번째 섹션의 원인과 결과를 설명합니다.",
+    "",
+    "[SECTION - 두 번째 확인]",
+    "[IMAGE INSERT - 2]",
+    "두 번째 섹션의 절차와 확인 항목을 설명합니다."
+  ].join("\n"),
+  tags: ["테스트"],
+  titleImageText: ["테스트 핵심", "원인과 확인"],
+  titleImagePrompt: "정보형 카드 안에 '테스트 핵심'과 '원인과 확인'을 크고 읽기 쉽게 정확히 표시한다.",
+  bodyImages: [
+    {
+      sequence: 1,
+      sectionHeading: "첫 번째 핵심",
+      path: "",
+      prompt: "첫 번째 핵심 섹션 전체의 원인과 결과 관계를 두 개의 구체적 대상과 방향 흐름으로 압축한다."
+    },
+    {
+      sequence: 2,
+      sectionHeading: "두 번째 확인",
+      path: "",
+      prompt: "두 번째 확인 섹션 전체의 절차와 확인 항목을 단계형 장면과 체크 구조로 빠짐없이 압축한다."
+    }
+  ]
+};
+const validWriterImageIssue = imageContractPrivate.writerImageContractIssueReason(validSectionImageWriterResult, {
+  includeTitleImage: true,
+  maxBodyImages: 10
+});
+if (validWriterImageIssue) {
+  failed = true;
+  console.error(`src/lib/codexRunner.js: valid title/section image contract was rejected: ${validWriterImageIssue}`);
+}
+const incompleteWriterImageIssue = imageContractPrivate.writerImageContractIssueReason({
+  ...validSectionImageWriterResult,
+  bodyImages: validSectionImageWriterResult.bodyImages.slice(0, 1)
+}, {
+  includeTitleImage: true,
+  maxBodyImages: 10
+});
+if (!/각각 한 장/.test(incompleteWriterImageIssue)) {
+  failed = true;
+  console.error("src/lib/codexRunner.js: missing per-section body image handoff must fail the Writer image contract");
+}
+
+const validImageWorkerResult = {
+  status: "success",
+  titleImagePath: "C:\\generated\\title.png",
+  titleImageVerified: true,
+  bodyImages: validSectionImageWriterResult.bodyImages.map((item) => ({
+    ...item,
+    path: `C:\\generated\\body-${item.sequence}.png`,
+    summaryVerified: true
+  }))
+};
+const validImageWorkerIssue = imageContractPrivate.imageWorkerContractIssueReason(
+  validImageWorkerResult,
+  validSectionImageWriterResult,
+  { includeTitleImage: true, maxBodyImages: 10 }
+);
+if (validImageWorkerIssue) {
+  failed = true;
+  console.error(`src/lib/codexRunner.js: valid Image Worker contract was rejected: ${validImageWorkerIssue}`);
+}
+const sessionFallbackImageWorkerIssue = imageContractPrivate.imageWorkerContractIssueReason({
+  status: "partial",
+  titleImagePath: "",
+  titleImageVerified: true,
+  bodyImages: validSectionImageWriterResult.bodyImages.map((item) => ({
+    ...item,
+    path: "",
+    summaryVerified: true
+  })),
+  notes: ["Generated image data is available in the Codex session for desktop recovery."]
+}, validSectionImageWriterResult, { includeTitleImage: true, maxBodyImages: 10 });
+if (sessionFallbackImageWorkerIssue) {
+  failed = true;
+  console.error(`src/lib/codexRunner.js: session image recovery contract was rejected: ${sessionFallbackImageWorkerIssue}`);
+}
+const unverifiedImageWorkerIssue = imageContractPrivate.imageWorkerContractIssueReason({
+  ...validImageWorkerResult,
+  bodyImages: validImageWorkerResult.bodyImages.map((item, index) => index === 0 ? { ...item, summaryVerified: false } : item)
+}, validSectionImageWriterResult, { includeTitleImage: true, maxBodyImages: 10 });
+if (!/검증되지 않았습니다/.test(unverifiedImageWorkerIssue)) {
+  failed = true;
+  console.error("src/lib/codexRunner.js: unverified section image must fail the Image Worker contract");
+}
+
 if (failed) {
   process.exit(1);
 }
@@ -1529,13 +1633,19 @@ if (!sourceFiles.codexRunner.content.includes("context.preferredTone,\n      res
   failed = true;
   console.error("src/lib/codexRunner.js: buildWriterContract must prefer user preferredTone over Research/Title tone");
 }
-if (writerPrompt && !writerPrompt.content.includes("Title image prompts may request short Korean headline text")) {
+if (writerPrompt && (
+  !writerPrompt.content.includes("Automatically derive titleImageText from the completed article")
+  || !writerPrompt.content.includes("Every titleImageText string must appear verbatim inside titleImagePrompt")
+)) {
   failed = true;
-  console.error("src/lib/codexRunner.js: Writer Agent prompt must allow short Korean text for title image prompts");
+  console.error("src/lib/codexRunner.js: Writer Agent prompt must automatically derive and visibly render whole-article title-card text");
 }
-if (writerPrompt && !writerPrompt.content.includes("Body image prompts must keep the existing no-text policy")) {
+if (writerPrompt && (
+  !writerPrompt.content.includes("create exactly one body image handoff for every [SECTION - ...] section")
+  || !writerPrompt.content.includes("Every body image must compress its entire corresponding section")
+)) {
   failed = true;
-  console.error("src/lib/codexRunner.js: Writer Agent prompt must keep body images under the existing no-text policy");
+  console.error("src/lib/codexRunner.js: Writer Agent prompt must create one compressed image for every section");
 }
 const imageWorkerPrompt = extractFunctionBlock(sourceFiles.codexRunner, "function buildImageWorkerPrompt", "Image Worker prompt");
 if (imageWorkerPrompt && !imageWorkerPrompt.content.includes("Image Worker must not copy image files into the app image directory")) {
@@ -1558,9 +1668,12 @@ if (imageWorkerPrompt && !imageWorkerPrompt.content.includes("Title image policy
   failed = true;
   console.error("src/lib/codexRunner.js: Image Worker prompt must separate title image policy");
 }
-if (imageWorkerPrompt && !imageWorkerPrompt.content.includes("Korean text is allowed in the title image")) {
+if (imageWorkerPrompt && (
+  !imageWorkerPrompt.content.includes("Visible Korean text is mandatory")
+  || !imageWorkerPrompt.content.includes("regenerate it once before returning a path")
+)) {
   failed = true;
-  console.error("src/lib/codexRunner.js: title image policy must allow short Korean text");
+  console.error("src/lib/codexRunner.js: title image policy must require visible summary text and regeneration on mismatch");
 }
 if (imageWorkerPrompt && !imageWorkerPrompt.content.includes("Body image policy:")) {
   failed = true;
@@ -1855,6 +1968,13 @@ if (
 ) {
   failed = true;
   console.error("src/lib/naverPublisher.js: image uploads must snapshot every data-compid, including offscreen components");
+}
+if (imageWorkerPrompt && (
+  !imageWorkerPrompt.content.includes("Body images are section-compression visuals")
+  || !imageWorkerPrompt.content.includes("compress the entire section's concrete subject")
+)) {
+  failed = true;
+  console.error("src/lib/codexRunner.js: Image Worker must preserve the section-compression contract");
 }
 const waitForNewImageComponent = extractFunctionBlock(
   sourceFiles.naverPublisher,

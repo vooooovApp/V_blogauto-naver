@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { normalizeMaxBodyImages } = require("./settings");
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
 
@@ -387,12 +388,12 @@ function normalizeAgentResult({
   topic,
   result,
   includeTitleImage = true,
-  maxBodyImages = 2,
+  maxBodyImages = 10,
   currentDateLabel = ""
 }) {
   const title = removeCurrentDateMentions(String(result.title || "").trim(), currentDateLabel);
   let article = removeCurrentDateMentions(String(result.article || "").trim(), currentDateLabel);
-  const bodyImageLimit = Math.min(10, Math.max(0, Number.isFinite(Number(maxBodyImages)) ? Number(maxBodyImages) : 2));
+  const bodyImageLimit = normalizeMaxBodyImages(maxBodyImages);
   if (!title) {
     throw new Error("Codex 결과에 제목이 없습니다.");
   }

@@ -11,7 +11,7 @@ const { runCodexGeneration, fetchCodexUsageSnapshot } = require("./lib/codexRunn
 const { normalizeAgentResult, getPreviewImages } = require("./lib/imageAssets");
 const { publishToNaver, checkNaverSession, verifyOpenNaverSession } = require("./lib/naverPublisher");
 const { publishToTistory, checkTistorySession } = require("./lib/tistoryPublisher");
-const { ensureSettingsFile, normalizeCodexModel, normalizeImageAspectRatio, resolveCodexCmdPath, readSettings, writeSettings } = require("./lib/settings");
+const { ensureSettingsFile, normalizeCodexModel, normalizeImageAspectRatio, normalizeMaxBodyImages, resolveCodexCmdPath, readSettings, writeSettings } = require("./lib/settings");
 const {
   ensureAccountStoreFile,
   readAccountStore,
@@ -1034,7 +1034,7 @@ async function startJob(form) {
   const includeTitleImage = form.includeTitleImage !== false;
   const titleImageAspectRatio = normalizeImageAspectRatio(form.titleImageAspectRatio || settings.titleImageAspectRatio || form.imageAspectRatio || settings.imageAspectRatio);
   const bodyImageAspectRatio = normalizeImageAspectRatio(form.bodyImageAspectRatio || settings.bodyImageAspectRatio || form.imageAspectRatio || settings.imageAspectRatio);
-  const maxBodyImages = Math.min(10, Math.max(0, Number.isFinite(Number(form.maxBodyImages)) ? Number(form.maxBodyImages) : 2));
+  const maxBodyImages = normalizeMaxBodyImages(form.maxBodyImages);
   const breakSentencesInBody = form.breakSentencesInBody !== false;
   const agentModels = form.agentModels || settings.agentModels || {};
   const shouldPublish = form.publishAfterGenerate === true || form.topicMode === "auto";
