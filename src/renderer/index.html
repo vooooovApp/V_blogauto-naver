@@ -101,6 +101,10 @@
             <h2>작업 입력</h2>
             <span id="settingsState" class="hint">설정 파일 자동 저장</span>
           </div>
+          <div class="pipe-switch" role="tablist" aria-label="작업 파이프">
+            <button id="blogPipeTab" class="pipe-tab active" type="button" role="tab" aria-selected="true">블로그</button>
+            <button id="productPipeTab" class="pipe-tab" type="button" role="tab" aria-selected="false">상품</button>
+          </div>
           <form id="jobForm" class="form-grid">
             <div class="manager-block wide">
               <div class="manager-head">
@@ -213,7 +217,59 @@
               <div id="categoryList" class="category-list"></div>
             </div>
 
-            <div class="topic-mode-row wide">
+            <div id="productPipe" class="product-pipe wide" hidden>
+              <div class="product-status-row" id="productStatusRow" aria-label="상품 작업 상태">
+                <span data-stage="collect">수집</span>
+                <span data-stage="draft">초안</span>
+                <span data-stage="review">검수</span>
+                <span data-stage="blog">블로그발행</span>
+                <span data-stage="store">스토어대기</span>
+              </div>
+              <label class="wide">
+                <span>상품 URL (공개 페이지만)</span>
+                <input id="productUrl" placeholder="https:// 공개 상품 페이지" />
+              </label>
+              <div class="button-row">
+                <button id="productCollectButton" class="ghost" type="button">URL 수집</button>
+              </div>
+              <p id="productCollectHint" class="hint">로그인 벽 URL은 자동 수집하지 않습니다. 실패 시 아래 수동 붙여넣기를 사용하세요.</p>
+              <label>
+                <span>수동 제목</span>
+                <input id="manualProductTitle" placeholder="추출 실패 시 붙여넣기" />
+              </label>
+              <label>
+                <span>수동 가격 후보</span>
+                <input id="manualProductPrice" placeholder="예: 12900원" />
+              </label>
+              <label class="wide">
+                <span>수동 설명</span>
+                <textarea id="manualProductDescription" rows="3" placeholder="공개 페이지에서 복사한 설명"></textarea>
+              </label>
+              <label class="wide">
+                <span>수동 이미지 URL</span>
+                <textarea id="manualProductImageUrls" rows="3" placeholder="한 줄에 하나, http(s)만"></textarea>
+              </label>
+              <div id="productExtractedBox" class="product-extracted" hidden></div>
+              <div class="button-row">
+                <button id="productDraftButton" class="ghost" type="button">초안 만들기</button>
+                <button id="productStartButton" class="primary" type="button">상품 작업 시작</button>
+              </div>
+              <div id="productWarningBox" class="product-warning" hidden></div>
+              <label class="wide">
+                <span>스마트스토어 복사용 팩</span>
+                <textarea id="storePackText" rows="7" readonly placeholder="초안을 만들면 상품명·카테고리 후보·태그·상세·고지가 여기에 나옵니다."></textarea>
+              </label>
+              <div class="button-row">
+                <button id="copyStorePackButton" class="ghost" type="button">팩 복사</button>
+                <button id="productApiRegisterButton" class="ghost" type="button" disabled title="공식 커머스 API가 연결되어 있지 않습니다.">API 등록 (비활성)</button>
+              </div>
+              <p id="productApiReason" class="hint">공식 Commerce API가 이 앱에 연결되어 있지 않아 API 등록 버튼은 꺼져 있습니다. 셀러센터 자동 클릭은 하지 않습니다.</p>
+              <label class="compact-check">
+                <input id="productStoreManualDone" type="checkbox" />
+                스마트스토어 수동 등록 완료
+              </label>
+            </div>
+            <div class="topic-mode-row wide blog-pipe">
               <label>
                 <span>글 발행 방식</span>
                 <select id="topicMode">
@@ -226,11 +282,11 @@
                 본문 내 문장 줄바꿈
               </label>
             </div>
-            <label id="repeatTermLabel">
+            <label id="repeatTermLabel" class="blog-pipe">
               <span>반복주기 Term (분)</span>
               <input id="repeatTermMinutes" type="number" min="1" step="1" value="60" />
             </label>
-            <label id="manualTopicLabel" class="wide">
+            <label id="manualTopicLabel" class="wide blog-pipe">
               <span>주제</span>
               <input id="topic" name="topic" />
             </label>
@@ -266,8 +322,8 @@
             </div>
             <button id="saveSettingsButton" class="ghost wide" type="button">설정 저장</button>
             <button id="tistoryTestButton" class="ghost wide" type="button">Tistory 테스트 발행</button>
-            <button id="startButton" class="primary wide" type="submit">작업 시작</button>
-            <button id="stopAutoButton" class="ghost wide" type="button" disabled>자동 중지</button>
+            <button id="startButton" class="primary wide blog-pipe" type="submit">작업 시작</button>
+            <button id="stopAutoButton" class="ghost wide blog-pipe" type="button" disabled>자동 중지</button>
           </form>
         </section>
 
@@ -279,6 +335,15 @@
           <div class="selected-title">
             <span>선정 제목</span>
             <strong id="selectedTitle">아직 선정 전</strong>
+          </div>
+          <div id="productPreviewExtras" class="product-preview-extras" hidden>
+            <div id="productPreviewWarning" class="product-warning" hidden></div>
+            <div class="product-draft-tabs" role="tablist" aria-label="상품 초안">
+              <button id="draftTabBlog" class="pipe-tab active" type="button" data-draft="blog">블로그</button>
+              <button id="draftTabStore" class="pipe-tab" type="button" data-draft="store">스토어 상세</button>
+              <button id="draftTabTistory" class="pipe-tab" type="button" data-draft="tistory">티스토리</button>
+              <button id="draftTabPack" class="pipe-tab" type="button" data-draft="pack">스토어 팩</button>
+            </div>
           </div>
           <textarea id="articlePreview" readonly placeholder="codex.cmd가 생성한 본문이 여기에 표시됩니다."></textarea>
         </section>
@@ -293,7 +358,7 @@
 
         <section class="panel research-log-panel" aria-label="Research Title Agent 로그">
           <div class="panel-head">
-            <h2>Research/Title Agent</h2>
+            <h2 id="researchPanelTitle">Research/Title Agent</h2>
           </div>
           <div id="researchLogStream" class="log-stream"></div>
         </section>

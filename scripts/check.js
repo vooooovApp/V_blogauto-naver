@@ -290,6 +290,34 @@ const sourceFiles = {
     relative: "src/lib/search.js",
     content: readSource("src", "lib", "search.js")
   },
+  productCollect: {
+    relative: "src/lib/productCollect.js",
+    content: readSource("src", "lib", "productCollect.js")
+  },
+  productWriter: {
+    relative: "src/lib/productWriter.js",
+    content: readSource("src", "lib", "productWriter.js")
+  },
+  productReview: {
+    relative: "src/lib/productReview.js",
+    content: readSource("src", "lib", "productReview.js")
+  },
+  productImages: {
+    relative: "src/lib/productImages.js",
+    content: readSource("src", "lib", "productImages.js")
+  },
+  storePack: {
+    relative: "src/lib/storePack.js",
+    content: readSource("src", "lib", "storePack.js")
+  },
+  productPipeline: {
+    relative: "src/lib/productPipeline.js",
+    content: readSource("src", "lib", "productPipeline.js")
+  },
+  readme: {
+    relative: "README.md",
+    content: readSource("README.md")
+  },
   smokeElectron: {
     relative: "scripts/smoke-electron.js",
     content: readSource("scripts", "smoke-electron.js")
@@ -2105,6 +2133,170 @@ if (
 ) {
   failed = true;
   console.error("src/lib/naverPublisher.js: every body image must mark its own newly inserted component");
+}
+
+assertIncludes(sourceFiles.preload, "collectProduct:", "product collect IPC");
+assertIncludes(sourceFiles.preload, "startProductJob:", "product start IPC");
+assertIncludes(sourceFiles.preload, "markProductStoreDone:", "product store-done IPC");
+assertIncludes(sourceFiles.main, "ipcMain.handle(\"product:collect\"", "product collect handler");
+assertIncludes(sourceFiles.main, "ipcMain.handle(\"product:start\"", "product start handler");
+assertIncludes(sourceFiles.main, "ipcMain.handle(\"job:start\"", "existing research job:start handler");
+assertIncludes(sourceFiles.main, "async function startJob(form)", "existing Research startJob must remain");
+assertIncludes(sourceFiles.main, "async function startProductJob", "product job must be a separate function");
+assertIncludes(sourceFiles.main, "publishToNaver({", "product/blog publish must still call publishToNaver");
+assertIncludes(sourceFiles.rendererIndex, "id=\"productPipeTab\"", "Product tab in the input panel");
+assertIncludes(sourceFiles.rendererIndex, "id=\"productUrl\"", "single product URL input");
+assertIncludes(sourceFiles.rendererIndex, "id=\"manualProductTitle\"", "manual title fallback");
+assertIncludes(sourceFiles.rendererIndex, "id=\"storePackText\"", "Smart Store copy pack textarea");
+assertIncludes(sourceFiles.rendererIndex, "id=\"productStoreManualDone\"", "manual store-complete checkbox");
+assertIncludes(sourceFiles.rendererIndex, "id=\"productApiRegisterButton\"", "Commerce API register button");
+assertIncludes(sourceFiles.rendererIndex, "disabled", "API register button starts disabled in markup");
+assertIncludes(sourceFiles.rendererApp, "setPipeMode", "blog/product pipe switch");
+assertIncludes(sourceFiles.rendererApp, "startProductJob", "renderer must call product start without replacing startJob");
+assertIncludes(sourceFiles.rendererApp, "window.blogAuto.startJob(form)", "existing Research startJob hook must remain");
+assertIncludes(sourceFiles.productWriter, "해외구매대행 고지", "store detail must include overseas purchase notice skeleton");
+assertIncludes(sourceFiles.productReview, "blocksCopy: false", "brand/counterfeit warning must not block copy");
+assertIncludes(sourceFiles.storePack, "COMMERCE_API_DISABLED_REASON", "copy-pack path must document why API is disabled");
+assertIncludes(sourceFiles.storePack, "return false", "official Commerce API must stay disabled until cleanly wired");
+assertIncludes(sourceFiles.readme, "상품 파이프가 하지 않는 것", "README must list Product out-of-scope items");
+assertIncludes(sourceFiles.readme, "셀러센터 UI 자동 클릭", "README must forbid seller-center UI automation");
+assertIncludes(sourceFiles.readme, "스마트스토어 비밀번호 저장", "README must forbid Smart Store password storage");
+assertIncludes(sourceFiles.readme, "로그인 벽 URL", "README must exclude login-wall URLs");
+assertIncludes(sourceFiles.readme, "구매대행 데스크", "README must exclude buying-desk integration");
+assertIncludes(sourceFiles.readme, "API 등록", "README must explain disabled Commerce API register");
+
+assertNotIncludes(sourceFiles.main, "sellercenter", "seller-center automation in main");
+assertNotIncludes(sourceFiles.main, "sell.smartstore.naver.com", "seller-center URL automation in main");
+assertNotIncludes(sourceFiles.productCollect, "sellercenter", "seller-center automation in collect");
+assertNotIncludes(sourceFiles.storePack, "smartStorePassword", "Smart Store password field");
+assertNotIncludes(sourceFiles.storePack, "sellerPassword", "seller password storage");
+assertNotIncludes(sourceFiles.productPipeline, "collectSearchResults", "Product pipe must not call Research search");
+assertNotIncludes(sourceFiles.productWriter, "runCodexGeneration", "Product writer templates must not depend on Research Codex");
+
+const productCollectLib = require(path.join(root, "src", "lib", "productCollect.js"));
+const productWriterLib = require(path.join(root, "src", "lib", "productWriter.js"));
+const productReviewLib = require(path.join(root, "src", "lib", "productReview.js"));
+const storePackLib = require(path.join(root, "src", "lib", "storePack.js"));
+const productPipelineLib = require(path.join(root, "src", "lib", "productPipeline.js"));
+
+const sampleProductHtml = `
+<html><head>
+<title>Ignore me</title>
+<meta property="og:title" content="캠핑 랜턴 2000lm" />
+<meta property="og:description" content="충전식 캠핑 랜턴입니다. 밝기 3단계." />
+<meta property="og:image" content="https://cdn.example.com/lantern.jpg" />
+<meta property="product:price:amount" content="12900" />
+<meta property="product:price:currency" content="KRW" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"캠핑 랜턴 2000lm","offers":{"@type":"Offer","price":"12900","priceCurrency":"KRW"}}
+</script>
+</head><body><h1>캠핑 랜턴 2000lm</h1><p>충전식 캠핑 랜턴입니다. 밝기 3단계와 후크가 있습니다.</p></body></html>
+`;
+const parsedProduct = productCollectLib.parseProductHtml(sampleProductHtml, "https://shop.example.com/lantern");
+if (parsedProduct.title !== "캠핑 랜턴 2000lm") {
+  failed = true;
+  console.error("src/lib/productCollect.js: OG/JSON-LD title must be extracted from a public product page");
+}
+if (!parsedProduct.priceCandidates.some((item) => /12900/.test(item))) {
+  failed = true;
+  console.error("src/lib/productCollect.js: price candidates must include JSON-LD or meta price");
+}
+if (!parsedProduct.imageUrls.includes("https://cdn.example.com/lantern.jpg")) {
+  failed = true;
+  console.error("src/lib/productCollect.js: image URLs must include og:image");
+}
+if (parsedProduct.loginWall) {
+  failed = true;
+  console.error("src/lib/productCollect.js: a normal public product page must not be treated as a login wall");
+}
+if (!productCollectLib.looksLikeLoginWallUrl("https://login.taobao.com/member/login.jhtml")) {
+  failed = true;
+  console.error("src/lib/productCollect.js: Taobao login URLs must be treated as login walls");
+}
+
+const manualMerged = productCollectLib.mergeProductExtract({
+  url: "https://shop.example.com/x",
+  title: "",
+  description: "",
+  priceCandidates: [],
+  imageUrls: [],
+  loginWall: false,
+  source: "fetch_failed"
+}, {
+  title: "수동 제목",
+  price: "9900원",
+  description: "수동 설명입니다.",
+  imageUrls: "https://cdn.example.com/a.jpg"
+});
+if (manualMerged.title !== "수동 제목" || !manualMerged.usedManualFallback) {
+  failed = true;
+  console.error("src/lib/productCollect.js: extract failure must accept a manual paste fallback");
+}
+
+const drafts = productWriterLib.writeProductDrafts({
+  url: "https://shop.example.com/lantern",
+  title: "캠핑 랜턴 2000lm",
+  description: "충전식 캠핑 랜턴",
+  priceCandidates: ["KRW 12900"],
+  imageUrls: ["https://cdn.example.com/lantern.jpg"]
+});
+if (!drafts.storeDetailHtml.includes("해외구매대행 고지") || !drafts.storeDetailHtml.includes("캠핑 랜턴 2000lm")) {
+  failed = true;
+  console.error("src/lib/productWriter.js: store detail HTML must include product name and overseas purchase notice");
+}
+if (!drafts.title || !drafts.article || !drafts.tistoryArticle || !drafts.tags.length) {
+  failed = true;
+  console.error("src/lib/productWriter.js: blog and Tistory drafts must include title, body, and tags");
+}
+
+const brandReview = productReviewLib.reviewProductDrafts(
+  productWriterLib.writeProductDrafts({
+    title: "구찌 레플리카 가방",
+    description: "가품 테스트",
+    priceCandidates: ["10000원"],
+    imageUrls: []
+  }),
+  { title: "구찌 레플리카 가방", description: "가품 테스트" }
+);
+if (brandReview.copyAllowed !== true) {
+  failed = true;
+  console.error("src/lib/productReview.js: brand/counterfeit warning must not block copy");
+}
+if (!brandReview.brandTokens.length || !brandReview.counterfeitTokens.length) {
+  failed = true;
+  console.error("src/lib/productReview.js: brand and counterfeit tokens must produce a non-blocking warning");
+}
+if (brandReview.warnings.some((item) => item.blocksCopy)) {
+  failed = true;
+  console.error("src/lib/productReview.js: warning entries must set blocksCopy false");
+}
+
+const pack = storePackLib.buildStorePack({
+  url: "https://shop.example.com/lantern",
+  title: "캠핑 랜턴 2000lm",
+  priceCandidates: ["KRW 12900"],
+  imageUrls: ["https://cdn.example.com/lantern.jpg"]
+}, drafts, brandReview);
+if (!pack.name || !pack.detail || !pack.copyText.includes("상품명") || !pack.copyAllowed) {
+  failed = true;
+  console.error("src/lib/storePack.js: copy pack must include name/detail and remain copyable");
+}
+const apiCapability = storePackLib.commerceApiCapability();
+if (apiCapability.enabled || apiCapability.buttonEnabled) {
+  failed = true;
+  console.error("src/lib/storePack.js: Commerce API register must stay disabled until official API is wired");
+}
+if (!/공식/.test(apiCapability.reason || "")) {
+  failed = true;
+  console.error("src/lib/storePack.js: disabled API reason must mention official Commerce API");
+}
+
+const productStatuses = productPipelineLib.PRODUCT_STATUSES;
+for (const required of ["collect", "draft", "review", "blog-published", "store-pending", "store-done", "failed"]) {
+  if (!productStatuses.includes(required)) {
+    failed = true;
+    console.error(`src/lib/productPipeline.js: missing required product status ${required}`);
+  }
 }
 
 if (failed) {

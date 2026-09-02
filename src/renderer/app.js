@@ -18,7 +18,16 @@ const state = {
   historyModalOpen: false,
   draggingAccountId: "",
   draggingCategoryId: "",
-  editingCategoryId: ""
+  editingCategoryId: "",
+  pipeMode: "blog",
+  productDraftTab: "blog",
+  productDrafts: {
+    blog: "",
+    store: "",
+    tistory: "",
+    pack: ""
+  },
+  commerceApi: { enabled: false, buttonEnabled: false, reason: "" }
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -127,7 +136,13 @@ function setRunState(status, detail = "") {
     session_expired: "danger",
     duplicate_retry: "warning",
     publishing: "info",
-    generating: "info"
+    generating: "info",
+    collect: "info",
+    draft: "info",
+    review: "info",
+    "blog-published": "success",
+    "store-pending": "warning",
+    "store-done": "success"
   };
   const labelMap = {
     success: "성공",
@@ -138,7 +153,13 @@ function setRunState(status, detail = "") {
     session_expired: "세션만료",
     duplicate_retry: "중복",
     publishing: "발행",
-    generating: "생성중"
+    generating: "생성중",
+    collect: "수집",
+    draft: "초안",
+    review: "검수",
+    "blog-published": "블로그발행",
+    "store-pending": "스토어대기",
+    "store-done": "스토어완료"
   };
   badge.className = `badge ${classMap[status] || "info"}`;
   badge.textContent = detail && detail !== status ? detail : (labelMap[status] || status || "대기");
@@ -154,7 +175,10 @@ function addLog(payload) {
     main: "#mainLogStream",
     research: "#researchLogStream",
     writer: "#writerLogStream",
-    image: "#mainLogStream"
+    image: "#mainLogStream",
+    collect: "#researchLogStream",
+    product: "#mainLogStream",
+    review: "#mainLogStream"
   };
   const stream = $(streamMap[payload.agent] || streamMap.main);
   if (!stream) return;
@@ -562,11 +586,17 @@ function renderHistory(history) {
     card.className = `history-card ${historyStatusClass(item.status)}`;
     const title = item.title || item.research_title || item.topic || "제목 없음";
     const meta = [
+      item.pipe === "product" && "상품 파이프",
       item.category && `카테고리 ${item.category}`,
       item.keyword && `키워드 ${item.keyword}`,
+      item.product_url && `URL ${item.product_url}`,
       item.blog_id && `블로그 ${item.blog_id}`
     ].filter(Boolean).join(" · ");
     const detailRows = [
+      ["파이프", item.pipe],
+      ["상품 URL", item.product_url],
+      ["상품 상태", item.product_status],
+      ["스토어 상태", item.store_status],
       ["주제", item.topic],
       ["선택 lane", item.selected_lane || item.lane || item.keyword_lane],
       ["검색어", item.search_query || item.query],
@@ -632,9 +662,9 @@ function renderHistorySummary(items) {
 
 function historyStatusClass(status) {
   const normalized = String(status || "");
-  if (normalized === "success" || normalized === "generated") return "success";
-  if (normalized === "duplicate_retry") return "warning";
-  if (normalized === "publishing" || normalized === "generating") return "info";
+  if (normalized === "success" || normalized === "generated" || normalized === "store-done" || normalized === "blog-published") return "success";
+  if (normalized === "duplicate_retry" || normalized === "store-pending" || normalized === "review" || normalized === "draft") return "warning";
+  if (normalized === "publishing" || normalized === "generating" || normalized === "collect") return "info";
   return "danger";
 }
 
@@ -1189,6 +1219,221 @@ function collectForm(target = {}) {
   };
 }
 
+function collectProductForm(extra = {}) {
+  return {
+    ...collectForm(),
+    productUrl: $("#productUrl")?.value.trim() || "",
+    manualTitle: $("#manualProductTitle")?.value.trim() || "",
+    manualPrice: $("#manualProductPrice")?.value.trim() || "",
+    manualDescription: $("#manualProductDescription")?.value.trim() || "",
+    manualImageUrls: $("#manualProductImageUrls")?.value.trim() || "",
+    downloadProductImages: true,
+    resizeProductImages: true,
+    ...extra
+  };
+}
+
+function setPipeMode(mode) {
+  state.pipeMode = mode === "product" ? "product" : "blog";
+  const productMode = state.pipeMode === "product";
+  document.body.dataset.pipe = state.pipeMode;
+  if ($("#blogPipeTab")) {
+    $("#blogPipeTab").classList.toggle("active", !productMode);
+    $("#blogPipeTab").setAttribute("aria-selected", String(!productMode));
+  }
+  if ($("#productPipeTab")) {
+    $("#productPipeTab").classList.toggle("active", productMode);
+    $("#productPipeTab").setAttribute("aria-selected", String(productMode));
+  }
+  if ($("#productPipe")) $("#productPipe").hidden = !productMode;
+  if ($("#productPreviewExtras")) $("#productPreviewExtras").hidden = !productMode;
+  document.querySelectorAll(".blog-pipe").forEach((node) => {
+    node.hidden = productMode;
+    if (productMode) node.style.display = "none";
+    else node.style.removeProperty("display");
+  });
+  if ($("#researchPanelTitle")) {
+    $("#researchPanelTitle").textContent = productMode ? "URL 수집" : "Research/Title Agent";
+  }
+  if ($("#articlePreview") && productMode && !state.productDrafts.blog) {
+    $("#articlePreview").placeholder = "상품 URL을 수집하면 스토어 상세와 블로그 초안이 여기에 표시됩니다.";
+  }
+  if (!productMode) updateModeControls();
+}
+
+function renderProductStages(stages = {}, status = "") {
+  const row = $("#productStatusRow");
+  if (!row) return;
+  const map = {
+    collect: stages.collect,
+    draft: stages.draft,
+    review: stages.review,
+    blog: stages.blogPublished,
+    store: stages.store
+  };
+  if (status === "failed") {
+    for (const key of Object.keys(map)) {
+      if (!map[key] || map[key] === "pending") {
+        map[key] = "failed";
+        break;
+      }
+    }
+  }
+  row.querySelectorAll("[data-stage]").forEach((el) => {
+    const value = map[el.dataset.stage] || "pending";
+    el.className = value;
+    if (el.dataset.stage === "store") {
+      el.textContent = value === "done" ? "스토어완료" : "스토어대기";
+    }
+  });
+}
+
+function renderProductExtracted(extracted, reason = "", needsManual = false) {
+  const box = $("#productExtractedBox");
+  if (!box) return;
+  if (!extracted) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  const prices = (extracted.priceCandidates || []).join(" / ") || "(없음)";
+  const images = (extracted.imageUrls || []).slice(0, 4).join("\n") || "(없음)";
+  box.hidden = false;
+  box.innerHTML = `
+    <strong>수집 결과</strong>
+    <div>제목: ${escapeHtml(extracted.title || "(없음)")}</div>
+    <div>가격 후보: ${escapeHtml(prices)}</div>
+    <div>설명: ${escapeHtml((extracted.description || "").slice(0, 240) || "(없음)")}</div>
+    <div>이미지 URL: ${escapeHtml(images)}</div>
+    <div>${escapeHtml(reason || "")}${needsManual ? " 수동 붙여넣기를 보완하세요." : ""}</div>
+  `;
+}
+
+function renderProductWarnings(warnings = []) {
+  const boxes = [$("#productWarningBox"), $("#productPreviewWarning")].filter(Boolean);
+  if (!warnings.length) {
+    boxes.forEach((box) => {
+      box.hidden = true;
+      box.textContent = "";
+    });
+    return;
+  }
+  const text = warnings.map((item) => item.message || item).join("\n");
+  boxes.forEach((box) => {
+    box.hidden = false;
+    box.textContent = text;
+  });
+}
+
+function applyProductDrafts(payload = {}) {
+  state.productDrafts = {
+    blog: payload.article || "",
+    store: payload.storeDetailHtml || payload.storeDetailText || "",
+    tistory: payload.tistoryArticle || payload.article || "",
+    pack: payload.storePack?.copyText || ""
+  };
+  if ($("#storePackText") && state.productDrafts.pack) {
+    $("#storePackText").value = state.productDrafts.pack;
+  }
+  showProductDraftTab(state.productDraftTab || "blog");
+  renderProductWarnings(payload.warnings || []);
+  renderProductStages(payload.stages || {}, payload.productStatus || payload.status || "");
+  renderProductExtracted(payload.extracted, payload.collectReason || payload.reason || "", payload.needsManual === true);
+  if (payload.commerceApi) applyCommerceApiState(payload.commerceApi);
+}
+
+function showProductDraftTab(tab) {
+  state.productDraftTab = ["blog", "store", "tistory", "pack"].includes(tab) ? tab : "blog";
+  document.querySelectorAll(".product-draft-tabs .pipe-tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.draft === state.productDraftTab);
+  });
+  const preview = $("#articlePreview");
+  if (!preview) return;
+  preview.value = state.productDrafts[state.productDraftTab] || "";
+}
+
+function applyCommerceApiState(capability = {}) {
+  state.commerceApi = capability;
+  const button = $("#productApiRegisterButton");
+  const reason = $("#productApiReason");
+  if (button) {
+    button.disabled = capability.buttonEnabled !== true;
+    button.title = capability.reason || "공식 커머스 API가 연결되어 있지 않습니다.";
+    button.textContent = capability.buttonEnabled ? "API 등록" : "API 등록 (비활성)";
+  }
+  if (reason) reason.textContent = capability.reason || "";
+}
+
+function setProductButtonsDisabled(disabled) {
+  ["#productCollectButton", "#productDraftButton", "#productStartButton"].forEach((selector) => {
+    if ($(selector)) $(selector).disabled = disabled;
+  });
+}
+
+async function runProductCollect() {
+  const form = collectProductForm();
+  if (!form.productUrl && !form.manualTitle) {
+    throw new Error("상품 URL 또는 수동 제목을 입력하세요.");
+  }
+  setProductButtonsDisabled(true);
+  setRunState("collect", "상품 수집");
+  try {
+    const result = await window.blogAuto.collectProduct(form);
+    renderProductExtracted(result.extracted, result.reason, result.needsManual);
+    if (result.extracted?.title && !$("#manualProductTitle").value) {
+      $("#manualProductTitle").value = result.extracted.title;
+    }
+    if (result.extracted?.description && !$("#manualProductDescription").value) {
+      $("#manualProductDescription").value = result.extracted.description;
+    }
+    if ((result.extracted?.priceCandidates || [])[0] && !$("#manualProductPrice").value) {
+      $("#manualProductPrice").value = result.extracted.priceCandidates[0];
+    }
+    if ((result.extracted?.imageUrls || []).length && !$("#manualProductImageUrls").value) {
+      $("#manualProductImageUrls").value = result.extracted.imageUrls.join("\n");
+    }
+    addLog({
+      level: result.ok ? "info" : "warn",
+      agent: "collect",
+      message: result.reason || "수집 완료",
+      at: new Date().toISOString()
+    });
+    setRunState(result.status || (result.ok ? "collect" : "failed"), result.ok ? "수집" : "수집 실패");
+    return result;
+  } finally {
+    setProductButtonsDisabled(false);
+  }
+}
+
+async function runProductJob({ publish } = {}) {
+  const form = collectProductForm({
+    publishAfterGenerate: publish === true
+  });
+  if (!form.productUrl && !form.manualTitle) {
+    throw new Error("상품 URL 또는 수동 제목을 입력하세요.");
+  }
+  if (publish && form.publishToTistoryAfterNaver && !form.tistoryBlogId) {
+    throw new Error("티스토리 블로그 ID가 필요합니다.");
+  }
+  if (publish && !form.naverId) {
+    throw new Error("발행까지 진행하려면 작업할 계정을 선택하거나 등록하세요.");
+  }
+  state.running = true;
+  setProductButtonsDisabled(true);
+  $("#startButton").disabled = true;
+  setTistoryTestButtonDisabled(true);
+  await saveSettingsNow();
+  setRunState(publish ? "publishing" : "draft", publish ? "상품 발행 준비" : "상품 초안");
+  try {
+    return await window.blogAuto.startProductJob(form);
+  } finally {
+    state.running = false;
+    setProductButtonsDisabled(false);
+    $("#startButton").disabled = false;
+    setTistoryTestButtonDisabled(false);
+  }
+}
+
 function applySettings(settings) {
   const map = {
     topic: "#topic",
@@ -1647,6 +1892,8 @@ async function boot() {
   const account = selectedAccount();
   if (account) selectAccount(account.id);
   renderHistory(initial.history || []);
+  applyCommerceApiState(initial.commerceApi || { buttonEnabled: false, reason: "공식 커머스 API가 연결되어 있지 않습니다." });
+  setPipeMode("blog");
 
   window.blogAuto.onAccountsUpdate((store) => {
     state.accountStore = store;
@@ -1668,7 +1915,11 @@ async function boot() {
     if (payload.rateLimits) setCodexRateLimits(payload.rateLimits);
   });
   window.blogAuto.onPreview((payload) => {
-    $("#articlePreview").value = payload.article || "";
+    if (payload.pipe === "product") {
+      applyProductDrafts(payload);
+    } else {
+      $("#articlePreview").value = payload.article || "";
+    }
     $("#articleMeta").textContent = payload.title || "본문 생성 완료";
     if (payload.title) $("#selectedTitle").textContent = payload.title;
     if (payload.tokenUsage) setTokenTotal(payload.tokenUsage.total || 0);
@@ -1686,8 +1937,12 @@ async function boot() {
       $("#startButton").disabled = false;
       setTistoryTestButtonDisabled(false);
     }
-    setRunState(payload.status, payload.status);
-    $("#articlePreview").value = payload.article || $("#articlePreview").value;
+    setRunState(payload.productStatus || payload.status, payload.productStatus || payload.status);
+    if (payload.pipe === "product") {
+      applyProductDrafts(payload);
+    } else {
+      $("#articlePreview").value = payload.article || $("#articlePreview").value;
+    }
     $("#articleMeta").textContent = payload.title || payload.status || "완료";
     if (payload.title) $("#selectedTitle").textContent = payload.title;
     if (payload.tokenUsage) setTokenTotal(payload.tokenUsage.total || 0);
@@ -1700,6 +1955,7 @@ async function boot() {
   $("#jobForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.running) return;
+    if (state.pipeMode === "product") return;
     try {
       if ($("#topicMode").value === "auto") {
         await startAutoPublishing();
@@ -2014,6 +2270,82 @@ async function boot() {
     }
     control.addEventListener("input", scheduleSettingsSave);
     control.addEventListener("change", scheduleSettingsSave);
+  });
+  $("#blogPipeTab")?.addEventListener("click", () => setPipeMode("blog"));
+  $("#productPipeTab")?.addEventListener("click", () => setPipeMode("product"));
+  document.querySelectorAll(".product-draft-tabs .pipe-tab").forEach((button) => {
+    button.addEventListener("click", () => showProductDraftTab(button.dataset.draft));
+  });
+  $("#productCollectButton")?.addEventListener("click", async () => {
+    try {
+      await runProductCollect();
+    } catch (error) {
+      setRunState("failed", "수집 실패");
+      addLog({ level: "error", agent: "collect", message: error.message, at: new Date().toISOString() });
+    }
+  });
+  $("#productDraftButton")?.addEventListener("click", async () => {
+    if (state.running) return;
+    try {
+      await runProductJob({ publish: false });
+    } catch (error) {
+      state.running = false;
+      setProductButtonsDisabled(false);
+      $("#startButton").disabled = false;
+      setTistoryTestButtonDisabled(false);
+      setRunState("failed", "초안 실패");
+      addLog({ level: "error", agent: "product", message: error.message, at: new Date().toISOString() });
+    }
+  });
+  $("#productStartButton")?.addEventListener("click", async () => {
+    if (state.running) return;
+    try {
+      await runProductJob({ publish: $("#publishAfterGenerate")?.checked === true });
+    } catch (error) {
+      state.running = false;
+      setProductButtonsDisabled(false);
+      $("#startButton").disabled = false;
+      setTistoryTestButtonDisabled(false);
+      setRunState("failed", "상품 작업 실패");
+      addLog({ level: "error", agent: "product", message: error.message, at: new Date().toISOString() });
+    }
+  });
+  $("#copyStorePackButton")?.addEventListener("click", async () => {
+    const text = $("#storePackText")?.value || "";
+    if (!text) {
+      addLog({ level: "warn", agent: "product", message: "복사할 스토어 팩이 없습니다.", at: new Date().toISOString() });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      addLog({ level: "info", agent: "product", message: "스마트스토어 복사용 팩을 클립보드에 복사했습니다. 복사는 경고가 있어도 막지 않습니다.", at: new Date().toISOString() });
+    } catch (error) {
+      addLog({ level: "error", agent: "product", message: `팩 복사 실패: ${error.message}`, at: new Date().toISOString() });
+    }
+  });
+  $("#productApiRegisterButton")?.addEventListener("click", async () => {
+    const result = await window.blogAuto.registerProductStoreApi({});
+    addLog({
+      level: "warn",
+      agent: "product",
+      message: result?.reason || "공식 커머스 API가 연결되어 있지 않습니다.",
+      at: new Date().toISOString()
+    });
+  });
+  $("#productStoreManualDone")?.addEventListener("change", async (event) => {
+    try {
+      const result = await window.blogAuto.markProductStoreDone({
+        ...collectProductForm(),
+        checked: event.target.checked === true
+      });
+      renderProductStages(result.stages || {}, result.status || "");
+      setRunState(result.status, result.status);
+      if (result.history) renderHistory(result.history);
+      addLog({ level: "info", agent: "product", message: result.reason || "스토어 상태를 갱신했습니다.", at: new Date().toISOString() });
+    } catch (error) {
+      event.target.checked = false;
+      addLog({ level: "error", agent: "product", message: error.message, at: new Date().toISOString() });
+    }
   });
 }
 

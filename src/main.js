@@ -19,9 +19,18 @@ const {
   updateAccountSession,
   getAccountProfileDir
 } = require("./lib/accountStore");
+const { collectProduct } = require("./lib/productCollect");
+const { downloadProductImages, toPublishImages } = require("./lib/productImages");
+const { commerceApiCapability, registerProductViaOfficialApi } = require("./lib/storePack");
+const {
+  runProductDraftPipeline,
+  markStoreManualDone,
+  markBlogPublished
+} = require("./lib/productPipeline");
 
 let mainWindow;
 let activeJob = null;
+let lastProductJob = null;
 const activeNaverSessions = new Map();
 const activeTistorySessions = new Map();
 
@@ -1004,6 +1013,467 @@ async function startTistoryTestPublish(form = {}) {
   }
 }
 
+function persistProductJob(runtimeRoot, jobId, state) {
+  const jobDir = path.join(runtimeRoot, "jobs", jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(path.join(jobDir, "product-result.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function productHistoryEntry({ jobId, account, blogId, category, state, status, reason }) {
+  const title = state?.drafts?.title || state?.collected?.extracted?.title || "";
+  return {
+    id: jobId,
+    pipe: "product",
+    create_at: new Date().toISOString(),
+    account_id: account?.id || "",
+    blog_id: blogId || "",
+    title,
+    topic: state?.productUrl || state?.collected?.extracted?.url || "",
+    keyword: "",
+    category: category || "",
+    product_url: state?.productUrl || state?.collected?.extracted?.url || "",
+    product_status: state?.status || status || "",
+    store_status: state?.stages?.store || "",
+    blog_status: state?.stages?.blogPublished || "",
+    status: status || state?.status || "failed",
+    harness_version: "product-pipe-v1",
+    final_verdict: state?.review?.verdict || "",
+    failure_phase: status === "failed" ? (state?.status || "product") : "",
+    embedding_model: "local-hash-v1",
+    embedding: createEmbedding(title || state?.productUrl || "product"),
+    token_total: 0,
+    reason: reason || state?.reason || ""
+  };
+}
+
+function emitProductPreview(jobId, state, extra = {}) {
+  const drafts = state?.drafts || {};
+  emit("job:preview", {
+    jobId,
+    pipe: "product",
+    title: drafts.title || state?.collected?.extracted?.title || "",
+    article: drafts.article || "",
+    tistoryArticle: drafts.tistoryArticle || "",
+    storeDetailHtml: drafts.storeDetailHtml || "",
+    storeDetailText: drafts.storeDetailText || "",
+    tags: drafts.tags || [],
+    warnings: state?.review?.warnings || [],
+    storePack: state?.storePack || null,
+    commerceApi: state?.commerceApi || commerceApiCapability(),
+    images: extra.images || state?.images || [],
+    imageNotes: extra.imageNotes || state?.imageNotes || [],
+    productStatus: state?.status || "",
+    stages: state?.stages || {},
+    extracted: state?.collected?.extracted || null,
+    copyAllowed: state?.review?.copyAllowed !== false,
+    tokenUsage: { total: 0 }
+  });
+}
+
+function normalizeManualProductForm(form = {}) {
+  return {
+    url: String(form.productUrl || form.url || "").trim(),
+    title: String(form.manualTitle || form.title || "").trim(),
+    price: String(form.manualPrice || form.price || "").trim(),
+    description: String(form.manualDescription || form.description || "").trim(),
+    imageUrls: String(form.manualImageUrls || form.imageUrls || "").trim(),
+    categoryHint: String(form.category || form.manualCategory || "").trim()
+  };
+}
+
+async function startProductCollect(form = {}) {
+  const productUrl = String(form.productUrl || form.url || "").trim();
+  const collected = await collectProduct({
+    url: productUrl,
+    manual: normalizeManualProductForm(form)
+  });
+  emit("job:preview", {
+    jobId: `product_collect_${Date.now()}`,
+    pipe: "product",
+    title: collected.extracted?.title || "",
+    article: collected.extracted?.description || "",
+    extracted: collected.extracted || null,
+    productStatus: collected.status,
+    needsManual: collected.needsManual === true,
+    collectReason: collected.reason || "",
+    collectNotes: collected.notes || [],
+    images: [],
+    imageNotes: [],
+    tokenUsage: { total: 0 }
+  });
+  return collected;
+}
+
+async function startProductJob(form = {}) {
+  if (activeJob) {
+    throw new Error("이미 실행 중인 작업이 있습니다.");
+  }
+
+  const runtimeRoot = getRuntimeRoot();
+  ensureRuntimeFiles(runtimeRoot);
+  ensureSettingsFile(runtimeRoot);
+  const settings = readSettings(runtimeRoot);
+  ensureAccountStoreFile(runtimeRoot, settings);
+
+  const jobId = `product_${Date.now()}`;
+  activeJob = { id: jobId, cancelled: false, pipe: "product" };
+
+  const accountStore = readAccountStore(runtimeRoot, settings);
+  const account = resolveAccount(form, accountStore);
+  const category = String(form.category || "").trim();
+  const naverId = String(form.naverId || account.naverId || "").trim();
+  const blogId = String(form.blogId || account.blogId || naverId).trim();
+  const naverPassword = String(form.naverPassword || account.naverPassword || "");
+  const publishVisibility = String(form.publishVisibility || (form.publishPrivate === false ? "public" : "private"));
+  const publishPrivate = publishVisibility !== "public";
+  const publishScheduleMode = String(form.publishScheduleMode || "now");
+  const reserveAfterHours = Number(form.reserveAfterHours || 0);
+  const breakSentencesInBody = form.breakSentencesInBody !== false;
+  const shouldPublish = form.publishAfterGenerate === true;
+  const publishToTistoryAfterNaver = shouldPublish && form.publishToTistoryAfterNaver === true;
+  let tistoryPublishReady = publishToTistoryAfterNaver;
+  const tistoryBlogId = String(form.tistoryBlogId || settings.tistoryBlogId || "").trim();
+  const productUrl = String(form.productUrl || form.url || "").trim();
+
+  if (shouldPublish && !naverId) {
+    activeJob = null;
+    throw new Error("발행까지 진행하려면 Naver ID가 필요합니다.");
+  }
+  if (publishToTistoryAfterNaver && !tistoryBlogId) {
+    activeJob = null;
+    throw new Error("티스토리 발행에는 블로그 ID가 필요합니다.");
+  }
+
+  const jobDir = path.join(runtimeRoot, "jobs", jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+  const nonSensitiveJob = {
+    jobId,
+    pipe: "product",
+    accountId: account.id || "",
+    topic: productUrl,
+    keyword: "",
+    category,
+    blogId,
+    status: "collect"
+  };
+
+  let preparedNaverSession = null;
+  let preparedTistorySession = null;
+  let browserProfileDir = getAccountProfileDir(runtimeRoot, account);
+  let state = null;
+
+  try {
+    if (shouldPublish) {
+      preparedNaverSession = await verifyPublishSessionBeforeGeneration({
+        runtimeRoot,
+        account,
+        blogId,
+        form,
+        settings,
+        jobId
+      });
+      browserProfileDir = preparedNaverSession.browserProfileDir || browserProfileDir;
+      if (tistoryPublishReady) {
+        const tistorySession = await verifyTistorySessionBeforeGeneration({
+          runtimeRoot,
+          form,
+          settings,
+          jobId
+        });
+        tistoryPublishReady = tistorySession.status === "valid";
+        preparedTistorySession = tistoryPublishReady ? tistorySession.preparedSession || null : null;
+        if (!tistoryPublishReady) {
+          safeLog(jobId, tistorySession.reason || "티스토리 세션이 없어 티스토리 발행은 건너뜁니다.", "warn");
+        }
+      }
+    }
+  } catch (error) {
+    activeJob = null;
+    if (error.code === "SESSION_EXPIRED") {
+      if (account.id) {
+        updateAccountSession(runtimeRoot, account.id, "expired", settings);
+        emitAccountStore(runtimeRoot);
+        await closeNaverSession(sessionKeyFor(account, browserProfileDir));
+      }
+      safeLog(jobId, error.message, "warn", "product");
+      updateStatus(jobId, "session_expired", error.message);
+      emit("job:complete", {
+        ...nonSensitiveJob,
+        status: "session_expired",
+        reason: error.message,
+        history: readHistory(runtimeRoot)
+      });
+      return { status: "session_expired", reason: error.message, pipe: "product" };
+    }
+    throw error;
+  }
+
+  try {
+    updateStatus(jobId, "collect", "상품 URL 수집");
+    state = await runProductDraftPipeline({
+      url: productUrl,
+      manual: normalizeManualProductForm(form),
+      category,
+      publishPurpose: form.publishPurpose || "",
+      preferredTone: form.preferredTone || "",
+      log: (message, level, agent = "product") => safeLog(jobId, message, level, agent)
+    });
+    state.jobId = jobId;
+    lastProductJob = state;
+    persistProductJob(runtimeRoot, jobId, state);
+
+    if (state.status === "failed") {
+      appendHistory(runtimeRoot, productHistoryEntry({
+        jobId,
+        account,
+        blogId,
+        category,
+        state,
+        status: "failed",
+        reason: state.reason
+      }));
+      updateStatus(jobId, "failed", state.reason);
+      emitProductPreview(jobId, state);
+      emit("job:complete", {
+        ...nonSensitiveJob,
+        status: "failed",
+        reason: state.reason,
+        title: state.drafts?.title || "",
+        article: state.drafts?.article || "",
+        storePack: state.storePack,
+        productStatus: state.status,
+        stages: state.stages,
+        history: readHistory(runtimeRoot)
+      });
+      return { status: "failed", reason: state.reason, pipe: "product", state };
+    }
+
+    updateStatus(jobId, state.status, state.reason);
+    emit("job:selectedTitle", {
+      jobId,
+      title: state.drafts?.title || "",
+      status: state.status,
+      verdict: state.review?.verdict || "",
+      at: new Date().toISOString()
+    });
+
+    if (form.downloadProductImages !== false && (state.collected?.extracted?.imageUrls || []).length) {
+      updateStatus(jobId, "review", "상품 이미지 내려받기");
+      const downloaded = await downloadProductImages({
+        imageUrls: state.collected.extracted.imageUrls,
+        jobDir,
+        resize: form.resizeProductImages !== false
+      });
+      state.images = downloaded.images;
+      state.imageNotes = downloaded.notes;
+      for (const note of downloaded.notes) {
+        safeLog(jobId, note, "warn", "image");
+      }
+    }
+
+    emitProductPreview(jobId, state);
+    persistProductJob(runtimeRoot, jobId, state);
+
+    let publishReason = "";
+    if (shouldPublish && state.drafts?.title && state.drafts?.article) {
+      const publishImages = toPublishImages(state.images || []);
+      const tags = buildTags(state.drafts.title, category, state.drafts.tags);
+      try {
+        updateStatus(jobId, "publishing", "상품 블로그 Naver 발행");
+        await publishToNaver({
+          accountId: account.id || "",
+          naverId,
+          blogId,
+          naverPassword,
+          category,
+          publishPrivate,
+          publishVisibility,
+          publishScheduleMode,
+          reserveAfterHours,
+          failOnLoginRequired: form.failOnLoginRequired === true,
+          title: state.drafts.title,
+          article: state.drafts.article,
+          titleImagePath: publishImages.titleImagePath,
+          bodyImages: publishImages.bodyImages,
+          breakSentencesInBody,
+          tags,
+          domNotes: form.naverEditorDomNotes || "",
+          browserProfileDir,
+          preparedContext: preparedNaverSession?.context,
+          preparedPage: preparedNaverSession?.page,
+          log: (message, level) => safeLog(jobId, message, level)
+        });
+        if (account.id) {
+          updateAccountSession(runtimeRoot, account.id, "valid", settings);
+          emitAccountStore(runtimeRoot);
+        }
+        publishReason = "네이버 블로그 발행 완료.";
+        if (publishToTistoryAfterNaver && tistoryPublishReady) {
+          try {
+            updateStatus(jobId, "publishing", "상품 글 티스토리 발행");
+            const tistoryProfileDir = getTistoryProfileDir(runtimeRoot, tistoryBlogId);
+            const tistoryKey = tistorySessionKey(tistoryBlogId, tistoryProfileDir);
+            preparedTistorySession = reusableTistorySession(tistoryKey);
+            await publishToTistory({
+              tistoryBlogId,
+              category,
+              publishPrivate,
+              publishVisibility,
+              publishScheduleMode,
+              reserveAfterHours,
+              failOnLoginRequired: form.failOnLoginRequired === true,
+              title: state.drafts.tistoryTitle || state.drafts.title,
+              article: state.drafts.tistoryArticle || state.drafts.article,
+              titleImagePath: publishImages.titleImagePath,
+              bodyImages: publishImages.bodyImages,
+              breakSentencesInBody,
+              tags,
+              browserProfileDir: tistoryProfileDir,
+              preparedContext: preparedTistorySession?.context,
+              preparedPage: preparedTistorySession?.page,
+              runtimeRoot,
+              log: (message, level) => safeLog(jobId, message, level)
+            });
+            writeSettings(runtimeRoot, {
+              tistorySessionStatus: "valid",
+              tistorySessionCheckedAt: new Date().toISOString()
+            });
+            publishReason = "네이버와 티스토리 발행 완료.";
+          } catch (error) {
+            publishReason = `네이버 발행은 완료됐지만 티스토리 발행에 실패했습니다: ${error.message}`;
+            writeSettings(runtimeRoot, {
+              tistorySessionStatus: error.code === "TISTORY_SESSION_EXPIRED" ? "expired" : "unknown",
+              tistorySessionCheckedAt: new Date().toISOString()
+            });
+            safeLog(jobId, publishReason, "warn", "product");
+          }
+        } else if (publishToTistoryAfterNaver) {
+          publishReason = "네이버 발행 완료. 티스토리 세션이 유효하지 않아 티스토리 발행은 건너뜁니다.";
+          safeLog(jobId, publishReason, "warn", "product");
+        }
+        markBlogPublished(state, { ok: true, reason: publishReason });
+      } catch (error) {
+        publishReason = `블로그 발행을 진행하지 못했습니다: ${error.message}`;
+        safeLog(jobId, publishReason, "warn", "product");
+        markBlogPublished(state, { ok: false, reason: publishReason });
+        if (error.code === "SESSION_EXPIRED" && account.id) {
+          updateAccountSession(runtimeRoot, account.id, "expired", settings);
+          emitAccountStore(runtimeRoot);
+        }
+      }
+    } else if (shouldPublish) {
+      publishReason = "초안이 없어 블로그 발행을 건너뛰었습니다.";
+      safeLog(jobId, publishReason, "warn", "product");
+      markBlogPublished(state, { ok: false, reason: publishReason });
+    } else {
+      publishReason = "사용자가 발행 실행을 끄고 상품 초안만 만들었습니다. 스마트스토어는 복사용 팩으로 수동 등록하세요.";
+      markBlogPublished(state, { ok: false, reason: publishReason });
+      safeLog(jobId, publishReason, "info", "product");
+    }
+
+    if (state.stages.store !== "done") {
+      markStoreManualDone(state, false);
+    }
+    lastProductJob = state;
+    persistProductJob(runtimeRoot, jobId, state);
+    emitProductPreview(jobId, state);
+
+    const historyStatus = state.status === "blog-published" || state.status === "store-pending" || state.status === "store-done"
+      ? (shouldPublish && state.stages.blogPublished === "done" ? "success" : "generated")
+      : state.status;
+    appendHistory(runtimeRoot, productHistoryEntry({
+      jobId,
+      account,
+      blogId,
+      category,
+      state,
+      status: historyStatus,
+      reason: state.reason || publishReason
+    }));
+    updateStatus(jobId, state.status, state.reason || publishReason);
+    const payload = {
+      ...nonSensitiveJob,
+      status: historyStatus,
+      productStatus: state.status,
+      stages: state.stages,
+      reason: state.reason || publishReason,
+      title: state.drafts?.title || "",
+      article: state.drafts?.article || "",
+      tistoryArticle: state.drafts?.tistoryArticle || "",
+      storeDetailHtml: state.drafts?.storeDetailHtml || "",
+      storePack: state.storePack,
+      commerceApi: state.commerceApi,
+      warnings: state.review?.warnings || [],
+      images: state.images || [],
+      imageNotes: state.imageNotes || [],
+      tags: state.drafts?.tags || [],
+      history: readHistory(runtimeRoot)
+    };
+    emit("job:complete", payload);
+    return { status: historyStatus, pipe: "product", productStatus: state.status, reason: state.reason, storePack: state.storePack };
+  } catch (error) {
+    if (state) {
+      state.status = "failed";
+      state.reason = error.message;
+      lastProductJob = state;
+      persistProductJob(runtimeRoot, jobId, state);
+    }
+    appendHistory(runtimeRoot, productHistoryEntry({
+      jobId,
+      account,
+      blogId,
+      category,
+      state,
+      status: "failed",
+      reason: error.message
+    }));
+    safeLog(jobId, error.message, "error", "product");
+    updateStatus(jobId, "failed", error.message);
+    emit("job:complete", {
+      ...nonSensitiveJob,
+      status: "failed",
+      reason: error.message,
+      title: state?.drafts?.title || "",
+      article: state?.drafts?.article || "",
+      history: readHistory(runtimeRoot)
+    });
+    return { status: "failed", pipe: "product", reason: error.message };
+  } finally {
+    activeJob = null;
+  }
+}
+
+function markLastProductStoreDone(form = {}) {
+  const runtimeRoot = getRuntimeRoot();
+  const checked = form.checked !== false;
+  if (!lastProductJob) {
+    throw new Error("완료 표시할 상품 작업이 없습니다. 먼저 상품 초안을 만드세요.");
+  }
+  markStoreManualDone(lastProductJob, checked);
+  persistProductJob(runtimeRoot, lastProductJob.jobId, lastProductJob);
+  const settings = readSettings(runtimeRoot);
+  const accountStore = readAccountStore(runtimeRoot, settings);
+  const account = resolveAccount(form, accountStore);
+  appendHistory(runtimeRoot, productHistoryEntry({
+    jobId: `${lastProductJob.jobId}_store`,
+    account,
+    blogId: String(form.blogId || account.blogId || ""),
+    category: String(form.category || ""),
+    state: lastProductJob,
+    status: lastProductJob.status === "store-done" ? "success" : "generated",
+    reason: lastProductJob.reason
+  }));
+  emitProductPreview(lastProductJob.jobId, lastProductJob);
+  updateStatus(lastProductJob.jobId, lastProductJob.status, lastProductJob.reason);
+  return {
+    status: lastProductJob.status,
+    reason: lastProductJob.reason,
+    stages: lastProductJob.stages,
+    storePack: lastProductJob.storePack,
+    history: readHistory(runtimeRoot)
+  };
+}
+
 async function startJob(form) {
   if (activeJob) {
     throw new Error("이미 실행 중인 작업이 있습니다.");
@@ -1851,7 +2321,8 @@ app.whenReady().then(() => {
       chrome: detectChromeInstall(),
       settings,
       accountStore: withAccountImageUrls(runtimeRoot, readAccountStore(runtimeRoot, settings)),
-      history: readHistory(runtimeRoot)
+      history: readHistory(runtimeRoot),
+      commerceApi: commerceApiCapability(settings)
     };
   });
 
@@ -2118,6 +2589,21 @@ app.whenReady().then(() => {
   ipcMain.handle("tistory:testPublish", (_event, form) => startTistoryTestPublish(form));
   ipcMain.handle("history:load", () => readHistory(getRuntimeRoot()));
   ipcMain.handle("job:start", (_event, form) => startJob(form));
+  ipcMain.handle("product:collect", (_event, form) => startProductCollect(form));
+  ipcMain.handle("product:start", (_event, form) => startProductJob(form));
+  ipcMain.handle("product:markStoreDone", (_event, form) => markLastProductStoreDone(form));
+  ipcMain.handle("product:registerStoreApi", async () => {
+    try {
+      await registerProductViaOfficialApi();
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        disabled: true,
+        reason: error.message
+      };
+    }
+  });
   ipcMain.handle("runtime:open", () => shell.openPath(getRuntimeRoot()));
   ipcMain.handle("file:open", (_event, filePath) => {
     if (!filePath) return false;
